@@ -1,0 +1,15 @@
+name: 기능 변경
+description: 해결할 문제와 변경 범위를 정합니다.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 사용자가 겪는 문제
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 변경 범위와 완료 조건
+    validations:
+      required: true

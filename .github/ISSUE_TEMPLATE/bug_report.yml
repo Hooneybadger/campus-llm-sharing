@@ -1,0 +1,16 @@
+name: 버그 보고
+description: 재현 조건과 기대 동작을 기록합니다.
+body:
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 재현 조건과 실제 동작
+      description: 입력, 환경, 재현 순서와 오류를 적어 주세요. 비밀값은 제거해 주세요.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 기대 동작과 완료 조건
+    validations:
+      required: true
