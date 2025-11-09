@@ -1,0 +1,9 @@
+# 배포 프로파일 v0 — 대형 모델 단독 (P2-3 결과로 교체 예정)
+role: serving-qwen30b
+startup: sequential
+health_port: 8000
+ready_timeout_s: 900
+escalate_on_failed: true
+restart: {max_restarts: 3, backoff_s: [5, 15, 45]}
+models:
+  - {id: qwen3-30b-a3b, port: 8001, budget: {gpu_memory_utilization: 0.90, max_model_len: 8192}}

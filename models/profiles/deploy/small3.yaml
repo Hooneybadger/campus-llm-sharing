@@ -1,0 +1,44 @@
+# Reference budget for a 32 GiB GPU; remeasure before deployment.
+role: serving-small
+startup: sequential
+health_port: 8000
+ready_timeout_s: 900
+escalate_on_failed: true
+restart:
+  max_restarts: 3
+  backoff_s:
+  - 5
+  - 15
+  - 45
+budget_note:
+  tool: models/budget.py
+  kv_dtype: auto
+  cold_retention: 0.4
+  margin_gib: 1.0
+  predicted_gpu_gib: 30.36
+  demand:
+    qwen3-4b: 0.6
+    ministral-3b: 0.2
+    phi4-mini: 0.2
+models:
+- id: qwen3-4b
+  port: 8001
+  budget:
+    kv_cache_memory_bytes: 2816475136
+    gpu_memory_utilization: 0.05
+    max_model_len: 4096
+    max_num_seqs: 32
+- id: ministral-3b
+  port: 8002
+  budget:
+    kv_cache_memory_bytes: 1841299456
+    gpu_memory_utilization: 0.05
+    max_model_len: 4096
+    max_num_seqs: 32
+- id: phi4-mini
+  port: 8003
+  budget:
+    kv_cache_memory_bytes: 2264924160
+    gpu_memory_utilization: 0.05
+    max_model_len: 4096
+    max_num_seqs: 32
