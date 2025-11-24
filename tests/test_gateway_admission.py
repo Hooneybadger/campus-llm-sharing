@@ -110,3 +110,193 @@ def test_draining_backend_excluded_from_pick_and_capacity():
 
 
 
+def troute(**kw):
+    cfg = {"backends": ["http://a:1", "http://b:1"], "max_inflight_per_backend": 32, "kv_tokens_per_backend": 10000,
+           "kv_fill": 1.0, "queue_max": 8, "queue_timeout_s": 0.5}
+    cfg.update(kw)
+    return ModelRoute("m", cfg)
+
+
+def test_token_budget_admits_by_tokens_not_count():
+    async def body():
+        r = troute()                                   # 백엔드당 1만 토큰 × 2
+        slots = [Slot(3000) for _ in range(6)]
+        for sl in slots:
+            assert await r.acquire(True, sl) is None   # 백엔드마다 9천
+        w = asyncio.create_task(r.acquire(True, Slot(2000)))
+        await asyncio.sleep(0.01)
+        assert not w.done()                            # 합계는 1.8만이지만 어느 백엔드에도 2천이 들어가지 않는다
+        r.release(slots[0])
+        assert await w is None
+        assert r.inflight == 6 and r.inflight_tokens == 17000
+    run(body())
+
+
+def test_token_mode_strict_fifo_no_overtaking():
+    async def body():
+        r = troute(backends=["http://a:1"])
+        s0 = Slot(9500)
+        await r.acquire(True, s0)
+        big = asyncio.create_task(r.acquire(True, Slot(5000)))    # 안 들어감
+        await asyncio.sleep(0.01)
+        small = asyncio.create_task(r.acquire(True, Slot(400)))   # 들어갈 자리는 있지만 앞(big)을 추월하지 않는다
+        await asyncio.sleep(0.01)
+        assert not big.done() and not small.done()
+        r.release(s0)
+        assert await big is None and await small is None
+    run(body())
+
+
+def test_reservation_keeps_each_backend_within_its_kv():
+    async def body():
+        r = troute()
+        a, b = Slot(8000), Slot(1000)
+        await r.acquire(True, a)
+        await r.acquire(True, b)
+        assert a.backend is not b.backend              # 예약이 적은 쪽으로 간다
+        c = Slot(8000)
+        await r.acquire(True, c)                       # 건수가 같아도 토큰이 적은 쪽(b의 백엔드)을 고른다
+        assert c.backend is b.backend
+        assert all(x.tokens <= r.backend_budget for x in r.backends.values())
+    run(body())
+
+
+def test_pooled_room_does_not_admit_when_no_single_backend_fits():
+    async def body():
+        r = troute()
+        await r.acquire(True, Slot(7000))
+        await r.acquire(True, Slot(7000))              # 합계 여유는 6천이지만 백엔드마다 3천뿐
+        w = asyncio.create_task(r.acquire(True, Slot(4000)))
+        await asyncio.sleep(0.01)
+        assert not w.done()
+        assert await w == "queue_timeout"
+    run(body())
+
+
+def test_request_is_sent_to_reserved_backend_not_least_inflight():
+    async def body():
+        r = troute()
+        s1, s2 = Slot(9000), Slot(100)
+        await r.acquire(True, s1)
+        await r.acquire(True, s2)
+        s1.backend.inflight = 1
+        s3 = Slot(9000)
+        await r.acquire(True, s3)                      # s2의 백엔드만 자리가 있다
+        s2.backend.inflight = 5                        # 건수는 더 많아도
+        assert r.pick(slot=s3) is s3.backend is s2.backend
+    run(body())
+
+
+def test_reservation_moves_when_backend_leaves_before_send():
+    async def body():
+        r = troute()
+        sl = Slot(3000)
+        await r.acquire(True, sl)
+        first = sl.backend
+        first.healthy = False
+        moved = r.pick(slot=sl)
+        assert moved is not first and moved is sl.backend
+        assert first.tokens == 0 and moved.tokens == 3000
+        r.release(sl)
+        assert moved.tokens == 0 and r.inflight_tokens == 0
+    run(body())
+
+
+def test_reservation_dropped_when_no_other_backend_has_room():
+    async def body():
+        r = troute()
+        s1, s2 = Slot(9000), Slot(9000)
+        await r.acquire(True, s1)
+        await r.acquire(True, s2)
+        s1.backend.healthy = False
+        assert r.pick(slot=s1) is None                 # 살아 있는 백엔드에 자리가 없으면 옮기지 않는다
+        r.release(s1)
+        assert r.inflight == 1 and r.inflight_tokens == 9000
+    run(body())
+
+
+def test_small_request_bypasses_blocked_head_only_when_configured():
+    async def body():
+        r = troute(backends=["http://a:1"], bypass_tokens=500, bypass_age_s=5)
+        s0 = Slot(9000)
+        await r.acquire(True, s0)
+        big = asyncio.create_task(r.acquire(True, Slot(5000)))
+        await asyncio.sleep(0.01)
+        assert await r.acquire(True, Slot(400)) is None    # 자리가 있는 작은 요청은 막힌 맨 앞을 앞지른다
+        mid = asyncio.create_task(r.acquire(True, Slot(600)))  # 기준보다 크면 줄을 선다
+        await asyncio.sleep(0.01)
+        assert not big.done() and not mid.done()
+        r.release(s0)
+        assert await big is None and await mid is None
+    run(body())
+
+
+def test_bypass_stops_when_head_waited_too_long():
+    async def body():
+        r = troute(backends=["http://a:1"], bypass_tokens=500, bypass_age_s=0.01, queue_timeout_s=0.3)
+        await r.acquire(True, Slot(9000))
+        big = asyncio.create_task(r.acquire(True, Slot(5000)))
+        await asyncio.sleep(0.05)                          # 맨 앞이 시한을 넘겼다
+        small = asyncio.create_task(r.acquire(True, Slot(400)))
+        await asyncio.sleep(0.01)
+        assert not small.done()                            # 더 앞지르지 않아 긴 요청의 기아를 막는다
+        assert await big == "queue_timeout" and await small == "queue_timeout"
+    run(body())
+
+
+def test_oversized_request_is_never_admitted():
+    async def body():
+        r = troute(backends=["http://a:1"])
+        assert not r.fits(10001)                       # 비어 있어도 들어가지 않는다(게이트웨이가 400으로 먼저 거른다)
+        assert await r.acquire(True, Slot(10001)) == "queue_timeout"
+    run(body())
+
+
+def test_backend_loss_does_not_overfill_survivor():
+    async def body():
+        r = troute()
+        s = [Slot(4000) for _ in range(4)]
+        for x in s:
+            await r.acquire(True, x)                   # 백엔드마다 8천
+        dead = s[0].backend
+        dead.healthy = False
+        w = asyncio.create_task(r.acquire(True, Slot(4000)))
+        await asyncio.sleep(0.01)
+        assert not w.done()                            # 죽은 쪽 여유가 살아 있는 쪽으로 넘어오지 않는다
+        survivor = next(b for b in r.backends.values() if b is not dead)
+        assert survivor.tokens == 8000
+        for x in s:
+            if x.backend is survivor:
+                r.release(x)
+                break
+        assert await w is None
+        assert survivor.tokens == 8000
+    run(body())
+
+
+def test_token_mode_uses_max_seqs_and_count_mode_uses_per_backend():
+    import app
+    r = troute(max_inflight_per_backend=5, max_seqs_per_backend=32)
+    assert r.max_inflight == 64                      # 토큰 모드: 32 × 2
+    app.ADMISSION["mode"] = "count"
+    try:
+        assert r.token_budget is None and r.max_inflight == 10   # 건수 모드: 5 × 2
+    finally:
+        app.ADMISSION["mode"] = "tokens"
+
+
+def test_token_budget_shrinks_with_backend_failure():
+    r = troute()
+    assert r.token_budget == 20000 and r.backend_budget == 10000
+    r.backends["http://a:1"].healthy = False
+    assert r.token_budget == 10000 and r.backend_budget == 10000
+
+
+def test_removed_backend_metric_series_is_deleted():
+    import app
+    r = route()
+    app.M_BACKEND_UP.labels("m", "http://a:1").set(0)
+    r.cfg["backends"] = ["http://b:1"]
+    r.sync_backends()
+    samples = [s for m in app.M_BACKEND_UP.collect() for s in m.samples if s.labels.get("backend") == "http://a:1"]
+    assert samples == []
