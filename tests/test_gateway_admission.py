@@ -300,3 +300,48 @@ def test_removed_backend_metric_series_is_deleted():
     r.sync_backends()
     samples = [s for m in app.M_BACKEND_UP.collect() for s in m.samples if s.labels.get("backend") == "http://a:1"]
     assert samples == []
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-q"]))
+
+
+# ---------------------------------------------------------------- 사용자별 사용량 (포털 '사용량' 화면)
+from app import UsageBook, kst_day  # noqa: E402
+
+
+def test_usage_book_counts_and_recent_order():
+    u = UsageBook(recent=3)
+    u.record("s1", "qwen3-4b", 200, "ok", 100, 20, 0.3, 1.2)
+    u.record("s1", "qwen3-4b", 429, "user_rpm")
+    u.record("s2", "gpt-oss-20b", 200, "ok", 50, 10)
+    s = u.summary("s1")
+    assert (s["requests"], s["prompt_tokens"], s["completion_tokens"]) == (2, 100, 20)
+    assert s["codes"] == {"200": 1, "429": 1}
+    assert [x["code"] for x in u.get("s1")["recent"]] == ["429", "200"]   # 최근 것이 먼저
+    for i in range(5):
+        u.record("s1", "m", 200, "ok")
+    assert len(u.get("s1")["recent"]) == 3                               # 최근 기록은 상한만큼만
+
+
+def test_usage_book_resets_at_kst_midnight(monkeypatch):
+    u = UsageBook()
+    u.record("s1", "m", 200, "ok", 10, 1)
+    monkeypatch.setattr("app.kst_day", lambda ts=None: "2099-01-01")
+    assert u.summary("s1")["requests"] == 0 and u.day == "2099-01-01"
+
+
+def test_kst_day_is_utc_plus_nine():
+    assert kst_day(0) == "1970-01-01" and kst_day(15 * 3600) == "1970-01-02"
+
+
+def test_discovered_backend_starts_unhealthy():
+    r = route()
+    r.discovered = ["http://c:1"]
+    r.sync_backends()
+    assert r.backends["http://a:1"].healthy        # 정적 백엔드는 그대로
+    assert not r.backends["http://c:1"].healthy    # 새 Pod 주소는 헬스체크 통과 전까지 제외
+    assert "http://c:1" not in [b.url for b in r.healthy()]
+    r.backends["http://a:1"].healthy = False
+    r.sync_backends()
+    assert not r.backends["http://a:1"].healthy    # 기존 백엔드의 헬스 상태는 다시 맞춰도 유지

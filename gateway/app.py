@@ -248,3 +248,49 @@ class ModelRoute:
                     self._admit(slot)
                     fut.set_result(True)
         M_QUEUE.labels(self.name).set(len(self.waiters))
+
+
+def kst_day(ts: float | None = None) -> str:
+    """한국 표준시(UTC+9, 일광 절약 없음) 날짜. 컨테이너 TZ와 무관하게 자정 기준을 맞춘다."""
+    return time.strftime("%Y-%m-%d", time.gmtime((time.time() if ts is None else ts) + 9 * 3600))
+
+
+class UsageBook:
+    """사용자별 오늘 사용량과 최근 요청 기록 — 실습 포털의 '사용량' 화면과 운영 화면의 사용자 표가 읽는다.
+    게이트웨이 메모리에만 두므로 재시작하면 0부터 다시 센다(장기 집계는 Prometheus gw_tokens_total)."""
+
+    def __init__(self, recent: int = 20):
+        self.day = kst_day()
+        self.users: dict[str, dict] = {}
+        self.recent = recent
+
+    def get(self, uid: str) -> dict:
+        today = kst_day()
+        if today != self.day:
+            self.day, self.users = today, {}
+        if uid not in self.users:
+            self.users[uid] = {"requests": 0, "codes": collections.Counter(), "prompt_tokens": 0,
+                               "completion_tokens": 0, "last_ts": None,
+                               "recent": collections.deque(maxlen=self.recent)}
+        return self.users[uid]
+
+    def record(self, uid: str, model: str, code: int | str, reason: str, prompt_tokens: int = 0,
+               completion_tokens: int = 0, ttft_s: float | None = None, dur_s: float | None = None,
+               estimated: bool = False):
+        u = self.get(uid)
+        ts = time.time()
+        u["requests"] += 1
+        u["codes"][str(code)] += 1
+        u["prompt_tokens"] += prompt_tokens
+        u["completion_tokens"] += completion_tokens
+        u["last_ts"] = ts
+        u["recent"].appendleft({"ts": ts, "model": model, "code": str(code), "reason": reason,
+                                "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                                "usage": "estimated" if estimated else "reported",
+                                "ttft_s": None if ttft_s is None else round(ttft_s, 3),
+                                "dur_s": None if dur_s is None else round(dur_s, 3)})
+
+    def summary(self, uid: str) -> dict:
+        u = self.get(uid)
+        return {"day": self.day, "requests": u["requests"], "codes": dict(u["codes"]),
+                "prompt_tokens": u["prompt_tokens"], "completion_tokens": u["completion_tokens"], "last_ts": u["last_ts"]}
