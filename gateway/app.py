@@ -294,3 +294,302 @@ class UsageBook:
         u = self.get(uid)
         return {"day": self.day, "requests": u["requests"], "codes": dict(u["codes"]),
                 "prompt_tokens": u["prompt_tokens"], "completion_tokens": u["completion_tokens"], "last_ts": u["last_ts"]}
+
+
+class Gateway:
+    def __init__(self, routes_path: Path, keys_path: Path, mode: str):
+        self.routes_path, self.keys_path, self.cli_mode = routes_path, keys_path, mode
+        self.mode = mode or "enforce"
+        self.routes: dict[str, ModelRoute] = {}
+        self.routes_mtime = 0.0
+        kj = json.loads(keys_path.read_text())
+        self.keys, self.tiers = kj["keys"], kj["tiers"]
+        self.usage = UsageBook()
+        self.user_inflight: dict[str, int] = collections.defaultdict(int)
+        self.user_hits: dict[str, collections.deque] = collections.defaultdict(collections.deque)
+        self.client = httpx.AsyncClient(limits=httpx.Limits(max_connections=4000, max_keepalive_connections=1000))
+        self.health_cfg = {"interval_s": 2.0, "timeout_s": 1.5, "fail_threshold": 2, "ok_threshold": 2}
+        self.load_routes()
+
+    def load_routes(self):
+        mt = self.routes_path.stat().st_mtime
+        if mt == self.routes_mtime:
+            return
+        cfg = yaml.safe_load(self.routes_path.read_text())
+        self.health_cfg.update(cfg.get("health", {}))
+        # 정책 모드 우선순위: CLI(--mode) > 환경변수 GW_MODE > routes 파일 mode > enforce
+        self.mode = self.cli_mode or os.environ.get("GW_MODE") or cfg.get("mode") or "enforce"
+        new = cfg["models"]
+        for name, mc in new.items():
+            if name in self.routes:
+                self.routes[name].update(mc)
+            else:
+                self.routes[name] = ModelRoute(name, mc)
+        for name in list(self.routes):
+            if name not in new:
+                del self.routes[name]
+        self.routes_mtime = mt
+        print(f"[gateway] routes loaded: {list(self.routes)} mode={self.mode}", flush=True)
+
+    async def watch_routes(self):
+        while True:
+            await asyncio.sleep(2)
+            try:
+                self.load_routes()
+            except Exception as e:  # noqa: BLE001 — 잘못된 파일이 와도 기존 라우트를 유지
+                print(f"[gateway] routes reload failed, keeping previous: {e}", flush=True)
+
+    async def discovery_loop(self):
+        """routes의 discovery 항목: 헤드리스 서비스의 EndpointSlice에서 Pod IP를 찾아 백엔드로 쓴다.
+        소형 3종 Pod는 모델 3개가 한 Pod에 있어 k8s readiness가 Pod 단위(전부/전무)다. 그래서 준비 안 된 주소까지
+        받아 오고(publishNotReadyAddresses), 모델 포트별 헬스 판정은 게이트웨이 헬스체크가 맡는다."""
+        if not any(r.cfg.get("discovery") for r in self.routes.values()):
+            return
+        from kubernetes import client, config
+        config.load_incluster_config()
+        api = client.DiscoveryV1Api()
+
+        def fetch(ns, svc):
+            return api.list_namespaced_endpoint_slice(ns, label_selector=f"kubernetes.io/service-name={svc}").items
+
+        while True:
+            for r in list(self.routes.values()):
+                ds = r.cfg.get("discovery")
+                if not ds:
+                    continue
+                ds = ds if isinstance(ds, list) else [ds]   # 본 서비스 + 대여 풀 확장 서비스(serving-*-x)
+                try:
+                    urls = []
+                    for d in ds:
+                        slices = await asyncio.to_thread(fetch, d.get("namespace", "llm-serving"), d["service"])
+                        for sl in slices:
+                            port = next((p.port for p in (sl.ports or []) if p.name == d.get("port_name")), d.get("port"))
+                            for ep in sl.endpoints or []:
+                                urls += [f"http://{a}:{port}" for a in ep.addresses]
+                    if sorted(urls) != sorted(r.discovered):
+                        print(f"[gateway] discovery {r.name}: {r.discovered} -> {urls}", flush=True)
+                        r.discovered = urls
+                        r.sync_backends()
+                except Exception as e:  # noqa: BLE001 — API 일시 오류 시 이전 목록 유지
+                    print(f"[gateway] discovery error {r.name}: {e}", flush=True)
+            await asyncio.sleep(5)
+
+    async def health_loop(self):
+        hc = self.health_cfg
+        while True:
+            checks = []
+            for r in list(self.routes.values()):
+                for b in list(r.backends.values()):
+                    checks.append(self.check(r, b))
+            await asyncio.gather(*checks)
+            for r in list(self.routes.values()):
+                r.pump()
+            await asyncio.sleep(hc["interval_s"])
+
+    async def check(self, r: ModelRoute, b: Backend):
+        hc = self.health_cfg
+        try:
+            resp = await self.client.get(b.url + "/health", timeout=hc["timeout_s"])
+            good = resp.status_code == 200
+        except httpx.HTTPError:
+            good = False
+        self.mark(r, b, good, "health")
+
+    def mark(self, r: ModelRoute, b: Backend, good: bool, kind: str):
+        hc = self.health_cfg
+        if good:
+            b.ok, b.fail = b.ok + 1, 0
+            if not b.healthy and b.ok >= hc["ok_threshold"]:
+                b.healthy = True
+                print(f"[gateway] backend RECOVERED {r.name} {b.url}", flush=True)
+        else:
+            b.fail, b.ok = b.fail + 1, 0
+            M_BACKEND_ERR.labels(r.name, b.url, kind).inc()
+            if b.healthy and b.fail >= hc["fail_threshold"]:
+                b.healthy = False
+                print(f"[gateway] backend EXCLUDED {r.name} {b.url} ({kind})", flush=True)
+        M_BACKEND_UP.labels(r.name, b.url).set(1 if b.healthy else 0)
+
+    # ------------------------------------------------------------------ user limits
+    def user_limit(self, user: dict) -> tuple[str, float] | None:
+        t = self.tiers[user["tier"]]
+        uid = user["user_id"]
+        now = time.monotonic()
+        hits = self.user_hits[uid]
+        while hits and now - hits[0] > 60:
+            hits.popleft()
+        if len(hits) >= t["rpm"]:
+            return "user_rpm", round(60 - (now - hits[0]) + 0.05, 2)
+        if self.user_inflight[uid] >= t["max_concurrent"]:
+            return "user_concurrency", 1.0
+        hits.append(now)
+        return None
+
+    def rpm_used(self, uid: str) -> int:
+        now = time.monotonic()
+        return sum(1 for h in self.user_hits.get(uid, ()) if now - h <= 60)
+
+    def user_of(self, req: Request) -> dict | None:
+        auth = req.headers.get("authorization", "")
+        key = auth[7:] if auth.lower().startswith("bearer ") else ""
+        return self.keys.get(hashlib.sha256(key.encode()).hexdigest())
+
+    def count_prompt(self, r: ModelRoute, body: dict) -> int:
+        if not r.tok:
+            return 0
+        n = 0
+        for m in body.get("messages", []):
+            c = m.get("content")
+            if isinstance(c, str):
+                n += len(r.tok.encode(c).ids) + 4
+            elif isinstance(c, list):
+                n += sum(len(r.tok.encode(p.get("text", "")).ids) for p in c if p.get("type") == "text")
+            for tc in m.get("tool_calls") or []:
+                n += len(r.tok.encode(tc.get("function", {}).get("arguments", "")).ids) + 8
+        if body.get("tools"):
+            n += len(r.tok.encode(json.dumps(body["tools"], ensure_ascii=False)).ids)
+        return n
+
+
+def err(code: int, msg: str, model: str, reason: str, retry_after: float | None = None, etype: str = "invalid_request_error"):
+    M_REQ.labels(model, str(code), reason).inc()
+    headers = {"Retry-After": str(max(1, int(round(retry_after))))} if retry_after else None
+    return JSONResponse({"error": {"message": msg, "type": etype, "code": reason}}, status_code=code, headers=headers)
+
+
+def synthesize_sse(raw: bytes):
+    """비스트리밍 chat.completion 응답을 OpenAI 스트리밍 청크 형식으로 바꾼다(TS-019 우회)."""
+    try:
+        d = json.loads(raw)
+    except json.JSONDecodeError:
+        yield b'data: {"error": {"message": "invalid upstream response", "code": "bad_upstream"}}\n\n'
+        return
+    choice = (d.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
+    delta = {"role": "assistant"}
+    if msg.get("content"):
+        delta["content"] = msg["content"]
+    if msg.get("tool_calls"):
+        delta["tool_calls"] = [{"index": i, **tc} for i, tc in enumerate(msg["tool_calls"])]
+    base = {"id": d.get("id"), "object": "chat.completion.chunk", "created": d.get("created"), "model": d.get("model")}
+    yield ("data: " + json.dumps({**base, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]}, ensure_ascii=False) + "\n\n").encode()
+    yield ("data: " + json.dumps({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": choice.get("finish_reason")}],
+                                  "usage": d.get("usage")}, ensure_ascii=False) + "\n\n").encode()
+    yield b"data: [DONE]\n\n"
+
+
+def build_app(gw: Gateway) -> FastAPI:
+    app = FastAPI()
+
+    @app.on_event("startup")
+    async def _bg():
+        asyncio.create_task(gw.health_loop())
+        asyncio.create_task(gw.watch_routes())
+        asyncio.create_task(gw.discovery_loop())
+
+    @app.get("/healthz")
+    async def healthz():
+        return PlainTextResponse("ok")
+
+    @app.get("/metrics")
+    async def metrics():
+        for r in gw.routes.values():
+            M_INFLIGHT.labels(r.name).set(r.inflight)
+        return PlainTextResponse(generate_latest(REG).decode(), media_type="text/plain; version=0.0.4")
+
+    @app.get("/admin/state")
+    async def state():
+        return {"mode": gw.mode, "admission": ADMISSION["mode"], "models": {n: {
+            "inflight": r.inflight, "queue": len(r.waiters), "max_inflight": r.max_inflight, "queue_max": r.queue_max,
+            "inflight_tokens": r.inflight_tokens, "token_budget": r.token_budget, "backend_budget": r.backend_budget,
+            "backends": {b.url: {"healthy": b.healthy, "draining": b.draining, "inflight": b.inflight, "fail": b.fail,
+                                 "tokens": b.tokens}
+                         for b in r.backends.values()}}
+            for n, r in gw.routes.items()}}
+
+    @app.get("/admin/usage")
+    async def usage_all(req: Request):
+        """오늘(KST) 요청이 많은 사용자 순. 학번이 담기므로 운영자 토큰을 요구한다."""
+        tok = os.environ.get("GW_ADMIN_TOKEN")
+        if tok and req.headers.get("x-admin-token") != tok:
+            return JSONResponse({"error": {"message": "admin token required"}}, status_code=403)
+        limit = int(req.query_params.get("limit", "20"))
+        meta = {u["user_id"]: u for u in gw.keys.values()}
+        rows = []
+        for uid in list(gw.usage.users):
+            s = gw.usage.summary(uid)
+            m = meta.get(uid, {})
+            rows.append({"user_id": uid, "group": m.get("group"), "tier": m.get("tier"),
+                         "inflight": gw.user_inflight.get(uid, 0), **{k: v for k, v in s.items() if k != "day"}})
+        rows.sort(key=lambda x: x["requests"], reverse=True)
+        return {"day": gw.usage.day, "users": rows[:limit], "active_users": len(rows)}
+
+    @app.get("/v1/me")
+    async def me(req: Request):
+        """API 키 주인의 등급 한도, 지금 쓰고 있는 양, 오늘 사용량, 최근 요청 — 포털 '사용량' 화면용."""
+        user = gw.user_of(req)
+        if not user:
+            return err(401, "Invalid API key. 정보전산원에서 발급받은 키를 확인하세요.", "-", "auth", etype="authentication_error")
+        uid, t = user["user_id"], gw.tiers[user["tier"]]
+        return {"user_id": uid, "group": user.get("group"), "team": user.get("team"), "tier": user["tier"],
+                "limits": {"rpm": t["rpm"], "max_concurrent": t["max_concurrent"], "max_tokens_cap": t["max_tokens_cap"]},
+                "now": {"rpm_used": gw.rpm_used(uid), "inflight": gw.user_inflight.get(uid, 0)},
+                "today": gw.usage.summary(uid), "recent": list(gw.usage.get(uid)["recent"])}
+
+    @app.post("/admin/drain")
+    async def drain(req: Request):
+        """대여 관리자가 풀 GPU를 회수하기 전에 호출: {"host": "<pod ip>", "drain": true|false}
+        해당 호스트의 모든 백엔드를 신규 라우팅에서 빼고, 남은 진행 중 요청 수를 돌려준다."""
+        # 사용자에게 열린 NodePort로도 /admin이 노출되므로 변경 계열은 운영자 토큰을 요구한다
+        tok = os.environ.get("GW_ADMIN_TOKEN")
+        if tok and req.headers.get("x-admin-token") != tok:
+            return JSONResponse({"error": {"message": "admin token required"}}, status_code=403)
+        body = await req.json()
+        host, flag = body["host"], bool(body.get("drain", True))
+        left = 0
+        for r in gw.routes.values():
+            for b in r.backends.values():
+                if f"//{host}:" in b.url:
+                    b.draining = flag
+                    left += b.inflight
+        return {"host": host, "draining": flag, "inflight": left}
+
+    @app.post("/admin/mode")
+    async def set_mode(req: Request):
+        """정책 모드 즉시 전환(P2-5 ABAB 비교용): {"mode": "enforce"|"passthrough"}. 다음 routes 재적재 전까지 유지."""
+        tok = os.environ.get("GW_ADMIN_TOKEN")
+        if tok and req.headers.get("x-admin-token") != tok:
+            return JSONResponse({"error": {"message": "admin token required"}}, status_code=403)
+        body = await req.json()
+        mode = body.get("mode", gw.mode)
+        if mode not in ("enforce", "passthrough") or body.get("admission", "tokens") not in ("tokens", "count"):
+            return JSONResponse({"error": {"message": "mode: enforce|passthrough, admission: tokens|count"}}, status_code=400)
+        gw.cli_mode = mode     # routes 파일 재적재 때도 유지되도록 최우선 값으로 둔다
+        gw.mode = mode
+        if "admission" in body:
+            ADMISSION["mode"] = body["admission"]
+        print(f"[gateway] mode -> {mode}, admission -> {ADMISSION['mode']}", flush=True)
+        return {"mode": gw.mode, "admission": ADMISSION["mode"]}
+
+    @app.get("/v1/models")
+    async def models():
+        return {"object": "list", "data": [{"id": n, "object": "model", "max_model_len": r.max_model_len,
+                                            "available": bool(r.healthy())} for n, r in gw.routes.items()]}
+
+
+    return app
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--routes", default="gateway/routes.k8s.yaml")
+    ap.add_argument("--keys", default=".secrets/gateway_keys.json")
+    ap.add_argument("--mode", default=None, choices=["enforce", "passthrough"])
+    ap.add_argument("--port", type=int, default=8080)
+    a = ap.parse_args()
+    gw = Gateway(Path(a.routes), Path(a.keys), a.mode)
+    uvicorn.run(build_app(gw), host="0.0.0.0", port=a.port, log_level="warning", timeout_keep_alive=75)
+
+
+if __name__ == "__main__":
+    main()

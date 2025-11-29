@@ -1,0 +1,71 @@
+# 클러스터 배포용 라우트 v2 — 백엔드는 헤드리스 서비스 디스커버리로 찾는다.
+# 정책 값 근거(P2-4): 백엔드당 동시 처리 한도 = min(KV 수용 건수, SLO 한도)
+#   소형(3종 동시 상주, 예산 v2): KV ≈ 1.7~1.9만 토큰 → 3.3K 에이전트 요청 약 5~6건, 세 모델 동시 부하 c=4에서 TTFT p95 ≈ 1 s, c=8에서 6~11 s (B2-v2)
+#   대형(단독): c=16에서 TTFT p95 ≈ 1.9~2.0 s (B1), KV 여유 큼
+# 한도는 "백엔드당 × 정상 백엔드 수"로 계산 → 복제 장애 시 수용량 자동 축소(게이트웨이 0.2.0)
+mode: enforce
+health: {interval_s: 2.0, timeout_s: 1.5, fail_threshold: 2, ok_threshold: 2}
+models:
+  Qwen3-4B-Instruct-2507:
+    discovery:
+      - {namespace: llm-serving, service: serving-small, port_name: qwen3-4b}
+      - {namespace: llm-serving, service: serving-small-x, port_name: qwen3-4b}     # 대여 풀 확장
+    kv_tokens_per_backend: 19100   # 예산 v2 KV 토큰(P2-3). 토큰 모드 입장 제어 기준
+    kv_fill: 0.9
+    bypass_tokens: 1280           # 이 크기 이하(기본 max_tokens 채팅)는 막힌 맨 앞을 앞지른다. P5-4
+    bypass_age_s: 10              # 맨 앞이 이만큼 기다리면 앞지르기를 멈춰 긴 요청의 기아를 막는다
+    max_seqs_per_backend: 32      # 토큰 모드 건수 상한 = vLLM max_num_seqs
+    max_inflight_per_backend: 6
+    queue_max: 24
+    queue_timeout_s: 20
+    max_model_len: 4096
+    tokenizer: /models/qwen3-4b-instruct-2507/tokenizer.json
+  Ministral-3-3B-Instruct-2512:
+    discovery:
+      - {namespace: llm-serving, service: serving-small, port_name: ministral-3b}
+      - {namespace: llm-serving, service: serving-small-x, port_name: ministral-3b}     # 대여 풀 확장
+    kv_tokens_per_backend: 17289   # 예산 v2 KV 토큰(P2-3). 토큰 모드 입장 제어 기준
+    kv_fill: 0.9
+    bypass_tokens: 1280           # 이 크기 이하(기본 max_tokens 채팅)는 막힌 맨 앞을 앞지른다. P5-4
+    bypass_age_s: 10              # 맨 앞이 이만큼 기다리면 앞지르기를 멈춰 긴 요청의 기아를 막는다
+    max_seqs_per_backend: 32      # 토큰 모드 건수 상한 = vLLM max_num_seqs
+    max_inflight_per_backend: 5
+    queue_max: 16
+    queue_timeout_s: 20
+    max_model_len: 4096
+    tokenizer: /models/ministral-3-3b-instruct-2512/tokenizer.json
+  Phi-4-mini-instruct:
+    stream_tools_workaround: true   # TS-019: 스트리밍 도구 파서가 출력을 버림 → 게이트웨이가 비스트리밍으로 받아 SSE 재구성
+    discovery:
+      - {namespace: llm-serving, service: serving-small, port_name: phi4-mini}
+      - {namespace: llm-serving, service: serving-small-x, port_name: phi4-mini}     # 대여 풀 확장
+    kv_tokens_per_backend: 17280   # 예산 v2 KV 토큰(P2-3). 토큰 모드 입장 제어 기준
+    kv_fill: 0.9
+    bypass_tokens: 1280           # 이 크기 이하(기본 max_tokens 채팅)는 막힌 맨 앞을 앞지른다. P5-4
+    bypass_age_s: 10              # 맨 앞이 이만큼 기다리면 앞지르기를 멈춰 긴 요청의 기아를 막는다
+    max_seqs_per_backend: 32      # 토큰 모드 건수 상한 = vLLM max_num_seqs
+    max_inflight_per_backend: 5
+    queue_max: 16
+    queue_timeout_s: 20
+    max_model_len: 4096
+    tokenizer: /models/phi-4-mini-instruct/tokenizer.json
+  gpt-oss-20b:
+    discovery:
+      - {namespace: llm-serving, service: serving-gptoss, port_name: gpt-oss-20b}
+      - {namespace: llm-serving, service: serving-gptoss-x, port_name: gpt-oss-20b}     # 대여 풀 확장
+    max_inflight_per_backend: 16
+    queue_max: 64
+    queue_timeout_s: 30
+    max_model_len: 8192
+    min_max_tokens: 1024        # TS-008
+    tokenizer: /models/gpt-oss-20b/tokenizer.json
+  Qwen3-30B-A3B-GPTQ-Int4:
+    discovery:
+      - {namespace: llm-serving, service: serving-qwen30b, port_name: qwen3-30b-a3b}
+      - {namespace: llm-serving, service: serving-qwen30b-x, port_name: qwen3-30b-a3b}     # 대여 풀 확장
+    max_inflight_per_backend: 16
+    queue_max: 64
+    queue_timeout_s: 30
+    max_model_len: 8192
+    min_max_tokens: 1536        # TS-008
+    tokenizer: /models/qwen3-30b-a3b-gptq-int4/tokenizer.json
