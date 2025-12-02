@@ -576,6 +576,206 @@ def build_app(gw: Gateway) -> FastAPI:
         return {"object": "list", "data": [{"id": n, "object": "model", "max_model_len": r.max_model_len,
                                             "available": bool(r.healthy())} for n, r in gw.routes.items()]}
 
+    @app.post("/v1/chat/completions")
+    async def chat(req: Request):
+        user = gw.user_of(req)
+        if not user:
+            return err(401, "Invalid API key. 정보전산원에서 발급받은 키를 확인하세요.", "-", "auth", etype="authentication_error")
+        uid = user["user_id"]
+
+        def fail(code, msg, model, reason, retry_after=None, etype="invalid_request_error"):
+            gw.usage.record(uid, model, code, reason)   # 거절도 사용자의 최근 요청에 남겨 원인을 스스로 확인하게 한다
+            return err(code, msg, model, reason, retry_after, etype)
+
+        try:
+            body = await req.json()
+        except json.JSONDecodeError:
+            return fail(400, "Request body is not valid JSON.", "-", "bad_json")
+        name = body.get("model", "")
+        r = gw.routes.get(name)
+        if not r:
+            return fail(404, f"Model '{name}' is not served. Available: {sorted(gw.routes)}", name or "-", "unknown_model")
+        enforce = gw.mode == "enforce"
+        tier = gw.tiers[user["tier"]]
+        ptok = 0
+
+        if enforce:
+            lim = gw.user_limit(user)
+            if lim:
+                return fail(429, f"Rate limit exceeded ({lim[0]}) for tier '{user['tier']}'. Retry after {lim[1]:.0f}s.",
+                            name, lim[0], lim[1], "rate_limit_error")
+            if "ignore_eos" in body and user["tier"] != "staff":
+                body.pop("ignore_eos")   # 벤치마크용 확장 파라미터는 운영자만
+            mt = int(body.get("max_tokens") or body.get("max_completion_tokens") or r.cfg.get("default_max_tokens", 1024))
+            mt = min(mt, tier["max_tokens_cap"])
+            if r.min_max_tokens and mt < r.min_max_tokens:
+                mt = r.min_max_tokens   # 추론 모델: 추론에 토큰을 다 써서 빈 답이 나오는 것 방지 (TS-007)
+            body["max_tokens"] = mt
+            body.pop("max_completion_tokens", None)
+            ptok = gw.count_prompt(r, body)
+            # 프롬프트 자체가 한도를 넘을 때만 거부한다. 프롬프트가 들어가면 max_tokens를 남은 컨텍스트로 줄인다
+            # (vLLM과 같은 동작 — 이전에는 "프롬프트 + max_tokens > 한도"면 거부해 vLLM이 처리할 요청을 버렸다, P2-5)
+            margin = 16   # 게이트웨이 토큰 계산과 실제 채팅 템플릿 사이의 오차 여유
+            # 백엔드 한 대의 예약 상한을 넘는 요청은 어느 백엔드에도 들어갈 수 없다. 대기 시한까지 붙잡아 두지 않고
+            # 컨텍스트 한도와 같은 규칙으로 줄이거나 거절한다.
+            limit = min(r.max_model_len, r.backend_budget or r.max_model_len)
+            if ptok and ptok + margin >= limit - 32:
+                return fail(400, f"Context too long: prompt≈{ptok} tokens >= model limit {limit}. "
+                                 f"Trim conversation history.", name, "context_length")
+            if ptok and ptok + mt + margin > limit:
+                mt = limit - ptok - margin
+                body["max_tokens"] = mt
+        if not r.healthy():
+            return fail(503, f"Model '{name}' is temporarily unavailable (no healthy backend).", name, "no_backend", 10, "service_unavailable")
+
+        t_arrive = time.perf_counter()
+        slot = Slot()
+        if enforce and r.backend_budget is not None:
+            slot.cost = min(ptok + int(body.get("max_tokens") or 0), r.backend_budget)
+        why = await r.acquire(enforce, slot)
+        if why:
+            ra = max(2.0, r.queue_timeout / 2)
+            return fail(503, f"Model '{name}' is overloaded ({why}). Retry after {ra:.0f}s.", name, why, ra, "service_unavailable")
+        M_QWAIT.labels(name).observe(time.perf_counter() - t_arrive)
+        gw.user_inflight[uid] += 1
+        released = False
+
+        def release():
+            nonlocal released
+            if not released:
+                released = True
+                r.release(slot)
+                gw.user_inflight[uid] -= 1
+
+        stream = bool(body.get("stream"))
+        # 스트리밍 도구 파서가 출력을 버리는 모델(TS-019: Phi-4-mini + phi4_mini_json)은 도구 요청을 비스트리밍으로 받아
+        # SSE로 다시 만들어 준다. 점진 출력은 사라지지만 도구 호출이 조용히 사라지는 것보다 낫다.
+        synth_stream = stream and bool(body.get("tools")) and bool(r.cfg.get("stream_tools_workaround"))
+        if synth_stream:
+            body = {k: v for k, v in body.items() if k not in ("stream", "stream_options")}
+            stream = False
+        # 사용량 기록용으로 vLLM에 마지막 usage 청크를 요청한다. 클라이언트가 요청하지 않았으면 그 청크는 걸러 낸다
+        # (choices가 빈 청크를 처리하지 못하는 클라이언트 코드가 있을 수 있다).
+        strip_usage = stream and not (body.get("stream_options") or {}).get("include_usage")
+        if strip_usage:
+            body["stream_options"] = {**(body.get("stream_options") or {}), "include_usage": True}
+        tried: list[str] = []
+        while True:
+            b = r.pick(exclude=tried, slot=slot)
+            if b is None:
+                release()
+                return fail(503, f"Model '{name}' has no healthy backend.", name, "no_backend", 10, "service_unavailable")
+            tried.append(b.url)
+            b.inflight += 1
+            try:
+                upstream = await gw.client.send(gw.client.build_request(
+                    "POST", b.url + "/v1/chat/completions", json=body,
+                    timeout=httpx.Timeout(600.0, connect=3.0)), stream=True)
+            except httpx.HTTPError as e:
+                b.inflight -= 1
+                gw.mark(r, b, False, "connect")
+                if len(tried) < 2:
+                    continue
+                release()
+                return fail(502, f"Backend error: {type(e).__name__}", name, "backend_connect")
+            break
+
+        if upstream.status_code != 200:
+            data = await upstream.aread()
+            await upstream.aclose()
+            b.inflight -= 1
+            release()
+            if upstream.status_code >= 500:
+                gw.mark(r, b, False, "http5xx")
+            M_REQ.labels(name, str(upstream.status_code), "backend").inc()
+            gw.usage.record(uid, name, upstream.status_code, "backend")
+            return PlainTextResponse(data, status_code=upstream.status_code, media_type="application/json")
+
+        broken = False
+
+        async def relay():
+            nonlocal broken
+            t_first, usage, held, outcome, sent = None, {}, b"", "client_closed", 0
+            try:
+                async for chunk in upstream.aiter_raw():
+                    if t_first is None:
+                        t_first = time.perf_counter() - t_arrive
+                        M_TTFT.labels(name).observe(t_first)
+                    held += chunk
+                    if not stream:
+                        yield chunk          # 비스트리밍: usage는 본문 JSON에 있으므로 끝에서 한 번 읽는다
+                        continue
+                    # SSE 이벤트가 청크 경계에 걸칠 수 있으므로 완결된 이벤트 단위로 넘긴다
+                    if b"\n\n" not in held:
+                        continue
+                    *events, held = held.split(b"\n\n")
+                    out, failed = [], False
+                    for ev in events:
+                        if ev.startswith(b"data: {\"error\""):
+                            # 엔진이 죽으면 vLLM API 서버가 오류 이벤트와 [DONE]을 보내고 정상 종료한다. 그대로 넘기면
+                            # 200 정상 완료로 집계되므로 끊긴 스트림과 같은 경로로 처리한다(P5-5)
+                            failed = True
+                            break
+                        if ev.startswith(b"data: {") and b"\"usage\"" in ev:
+                            try:
+                                usage = json.loads(ev[6:]).get("usage") or usage
+                            except (UnicodeDecodeError, json.JSONDecodeError):
+                                pass
+                            if strip_usage and b"\"choices\":[]" in ev:
+                                continue
+                        elif ev.startswith(b"data: [DONE]"):
+                            # 클라이언트는 [DONE]을 받자마자 연결을 끊는 경우가 많다. 그러면 이 생성기가 루프 끝에
+                            # 닿기 전에 닫히므로, 완료 판정은 [DONE]을 넘기는 시점에 한다.
+                            outcome = "ok"
+                        elif b"\"delta\":{" in ev and b"\"delta\":{}" not in ev and b"\"content\":\"\"" not in ev:
+                            sent += 1        # usage 청크가 없을 때 쓰는 출력 토큰 추정치(텍스트 이벤트 ≈ 토큰)
+                        out.append(ev + b"\n\n")
+                    if out:
+                        yield b"".join(out)
+                    if failed:
+                        raise httpx.RemoteProtocolError("upstream sent an error event")
+                if stream and held:
+                    yield held
+                if stream and outcome != "ok":
+                    # 연결이 오류 없이 닫혀도 [DONE]이 없으면 잘린 응답이다
+                    raise httpx.RemoteProtocolError("upstream stream ended without [DONE]")
+                outcome = "ok"
+            except httpx.HTTPError:
+                # 이미 200 헤더를 보냈으므로 상태 코드로 알릴 수 없다. SSE error 이벤트로 알려
+                # 클라이언트가 잘린 응답을 정상으로 받아들이지 않게 한다 (TS-006).
+                outcome, broken = "stream_broken", True
+                gw.mark(r, b, False, "stream_broken")
+                if stream:
+                    M_REQ.labels(name, "200", "stream_broken").inc()
+                    yield STREAM_ERROR
+            finally:
+                # 클라이언트가 끊으면 이 안의 await가 취소될 수 있으므로 집계를 먼저 끝낸다
+                b.inflight -= 1
+                release()
+                if not stream:
+                    try:
+                        usage = json.loads(held).get("usage") or {}
+                    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+                        usage = {}
+                if outcome == "ok":
+                    M_REQ.labels(name, "200", "ok").inc()
+                estimated = stream and not usage
+                pt, ct = int(usage.get("prompt_tokens") or ptok), sent if estimated else int(usage.get("completion_tokens") or 0)
+                if estimated:
+                    M_USAGE_EST.labels(name, outcome).inc()
+                M_TOK.labels(name, user["tier"], "prompt").inc(pt)
+                M_TOK.labels(name, user["tier"], "completion").inc(ct)
+                gw.usage.record(uid, name, 200, outcome, pt, ct, t_first, time.perf_counter() - t_arrive, estimated)
+                await upstream.aclose()
+
+        if stream:
+            return StreamingResponse(relay(), media_type="text/event-stream")
+        data = b"".join([c async for c in relay()])
+        if broken:
+            return err(502, "Upstream model server connection lost before the response completed.", name, "backend_stream_broken", etype="server_error")
+        if synth_stream:
+            return StreamingResponse(synthesize_sse(data), media_type="text/event-stream")
+        return PlainTextResponse(data, media_type="application/json")
 
     return app
 
