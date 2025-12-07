@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 from kubernetes import client, config
 from prometheus_client import CollectorRegistry, Counter, Gauge, generate_latest
 
+from autoscale import Config, Policy, UnitView, unit_load
 from fastapi.responses import PlainTextResponse
 
 NS_SERVING = os.environ.get("SERVING_NAMESPACE", "llm-serving")
@@ -166,7 +167,60 @@ class Manager:
             await asyncio.sleep(5)
 
     # ---------------------------------------------------------------- 탄력 배치
+    def unit_views(self, state: dict, slots: list[dict], t: float) -> dict[str, UnitView]:
+        """게이트웨이 /admin/state + 슬롯 → 묶음별 관측값. 사용률 = 처리 중 토큰 / 토큰 예산(없으면 건수 / 건수 한도)."""
+        views = {}
+        for unit, models in UNIT_MODELS.items():
+            util, queue = unit_load(state, models)
+            mine = [s for s in slots if s["state"] == "expansion" and s["labels"].get("app") == f"{unit}-x"]
+            v = UnitView(util, queue,
+                         [t - s["ready_since"] for s in mine if s["pod_ready"]], sum(1 for s in mine if not s["pod_ready"]))
+            views[unit] = v
+            M_UTIL.labels(unit).set(util)
+            M_EXTRAS.labels(unit, "ready").set(len(v.ready_ages))
+            M_EXTRAS.labels(unit, "starting").set(v.starting)
+        return views
 
+    async def autoscale_loop(self):
+        """5초마다 관측 → autoscale.Policy 판단 → 확장(expand)·회수(reclaim)·넘겨주기(steal) 실행."""
+        pol = Policy(Config(**AUTOSCALE_CONFIG), t0=now())
+        busy: set[str] = set()      # 회수 중인 풀 노드
+
+        def oldest(unit: str, slots: list[dict]) -> dict | None:
+            mine = [s for s in slots if s["state"] == "expansion" and s["labels"].get("app") == f"{unit}-x" and s["pod_ready"]
+                    and s["node"] not in busy and now() - s["ready_since"] >= pol.cfg.min_life_s]
+            return min(mine, key=lambda s: s["ready_since"]) if mine else None
+
+        async def take_back(slot: dict, then_unit: str | None):
+            busy.add(slot["node"])
+            try:
+                r = await self.reclaim_expansion(slot)
+                print(f"[pool] reclaim {slot['pod']} -> {r}", flush=True)
+                if then_unit:
+                    async with self.lock:
+                        print(f"[pool] expand {then_unit} on {slot['node']} -> {self.expand(then_unit, slot['node'])}", flush=True)
+            finally:
+                busy.discard(slot["node"])
+
+        while AUTOSCALE_ENABLED:
+            try:
+                st = (await self.http.get(f"{GATEWAY}/admin/state")).json()
+                async with self.lock:
+                    slots = [s for s in self.slots() if s["ready"]]
+                    views = self.unit_views(st, slots, now())
+                    free = [s for s in slots if s["state"] == "free" and s["node"] not in busy]
+                    for act in pol.decide(now(), views, len(free)):
+                        M_ACT.labels(act[0], act[-1]).inc()
+                        print(f"[pool] decide {act} util={ {u: round(v.util, 2) for u, v in views.items()} }", flush=True)
+                        if act[0] == "expand":
+                            self.expand(act[1], free.pop(0)["node"])
+                        elif act[0] in ("reclaim", "steal"):
+                            slot = oldest(act[1], slots)
+                            if slot:
+                                asyncio.create_task(take_back(slot, act[2] if act[0] == "steal" else None))
+            except Exception as e:  # noqa: BLE001 — 게이트웨이·API 일시 오류는 다음 주기에 다시
+                print(f"[pool] autoscale error: {e}", flush=True)
+            await asyncio.sleep(5)
 
     # ---------------------------------------------------------------- 추론 확장
     def expand(self, model_unit: str, node: str) -> dict:
@@ -197,6 +251,7 @@ def build_app(m: Manager) -> FastAPI:
     async def _bg():
         asyncio.create_task(m.refresh())
         asyncio.create_task(m.failover_loop())
+        asyncio.create_task(m.autoscale_loop())
 
     @app.get("/healthz")
     async def healthz():
