@@ -1,0 +1,20 @@
+# 포털 모델 안내 — 표시 순서와 쓰임새. 근거는 실험 기록(도구 호출 신뢰도 TS-016, 스트리밍 도구 TS-019, 문맥 길이 P2-5 §4).
+# 게이트웨이 라우트(gateway/routes.k8s.yaml)에 없는 모델은 화면에 나오지 않는다.
+models:
+  Qwen3-4B-Instruct-2507:
+    title: Qwen3-4B
+    use: 일반 질의응답과 도구 호출 실습에 먼저 권합니다.
+  Ministral-3-3B-Instruct-2512:
+    title: Ministral-3B
+    use: 짧은 질문에 빠르게 답합니다.
+    caution: 도구 호출은 Qwen3-4B가 더 안정적입니다.
+  Phi-4-mini-instruct:
+    title: Phi-4-mini
+    use: 짧은 질의응답에 맞습니다.
+    caution: 도구를 붙인 스트리밍 요청은 답이 끝나야 한 번에 도착합니다.
+  gpt-oss-20b:
+    title: GPT-OSS-20B
+    use: 추론이 필요한 과제, 도구 호출, 긴 대화(8K)에 맞습니다.
+  Qwen3-30B-A3B-GPTQ-Int4:
+    title: Qwen3-30B-A3B
+    use: 긴 지시문을 쓰는 에이전트 실습(8K)에 맞습니다.
