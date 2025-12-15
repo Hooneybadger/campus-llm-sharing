@@ -130,3 +130,156 @@ def passthrough(r: httpx.Response) -> JSONResponse:
     except ValueError:
         body = {"error": {"message": r.text[:300]}}
     return JSONResponse(body, status_code=r.status_code)
+
+
+async def gw_me(req: Request) -> tuple[int, dict]:
+    r = await http.get(f"{GATEWAY}/v1/me", headers=auth_header(req))
+    return r.status_code, r.json()
+
+
+async def prom(q: str) -> list[dict]:
+    r = await http.get(f"{PROM}/api/v1/query", params={"query": q})
+    r.raise_for_status()
+    return r.json()["data"]["result"]
+
+
+def num(v: str) -> float | None:
+    x = float(v)
+    return None if math.isnan(x) or math.isinf(x) else x
+
+
+async def model_board() -> list[dict]:
+    """모델별 상태: 게이트웨이 라우트(문맥 길이·가용) + 입장 제어 상태(처리 중·대기·토큰 예산) + 쓰임새 안내."""
+    models, state = await asyncio.gather(http.get(f"{GATEWAY}/v1/models"), http.get(f"{GATEWAY}/admin/state"))
+    st = state.json()["models"]
+    rows = []
+    for m in models.json()["data"]:
+        s = st.get(m["id"], {})
+        backends = s.get("backends", {}).values()
+        note = NOTES.get(m["id"], {})
+        rows.append({
+            "id": m["id"], "title": note.get("title", m["id"]), "use": note.get("use", ""), "caution": note.get("caution"),
+            "max_model_len": m["max_model_len"], "available": m["available"],
+            "inflight": s.get("inflight", 0), "queue": s.get("queue", 0), "queue_max": s.get("queue_max"),
+            "max_inflight": s.get("max_inflight"), "inflight_tokens": s.get("inflight_tokens", 0),
+            "token_budget": s.get("token_budget"),
+            "backends_total": len(backends), "backends_healthy": sum(1 for b in backends if b["healthy"] and not b["draining"]),
+        })
+    order = list(NOTES)
+    rows.sort(key=lambda x: order.index(x["id"]) if x["id"] in order else len(order))
+    return rows
+
+
+async def section(coro):
+    """운영 화면은 영역마다 따로 실패할 수 있게 한다: 한 출처가 죽어도 나머지는 보인다."""
+    try:
+        return {"ok": True, "data": await coro}
+    except Exception as e:   # noqa: BLE001 — 화면에 원인을 그대로 보여 준다
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+
+
+
+
+
+
+
+
+
+
+
+def build_app(chats: ChatStore | None = None) -> FastAPI:
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    chats = chats or ChatStore(CHAT_DB)
+
+    async def chat_user(req: Request, cid: str | None = None) -> tuple[str | None, JSONResponse | None]:
+        """API 키 주인의 user_id. 키가 틀리거나 대화 ID 형식이 맞지 않으면 바로 돌려줄 응답을 함께 준다."""
+        if cid is not None and not CHAT_ID.match(cid):
+            return None, JSONResponse({"error": {"message": "invalid chat id"}}, status_code=400)
+        code, me = await gw_me(req)
+        if code != 200:
+            return None, JSONResponse({"error": {"message": "invalid API key"}}, status_code=401)
+        return me["user_id"], None
+
+    @app.middleware("http")
+    async def headers(req: Request, call_next):
+        resp = await call_next(req)
+        resp.headers.update(SECURITY_HEADERS)
+        if req.url.path.startswith("/api/"):
+            resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.get("/healthz")
+    async def healthz():
+        return {"ok": True}
+
+    @app.get("/")
+    async def index():
+        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/api/config")
+    async def cfg():
+        return PUBLIC
+
+    @app.get("/api/me")
+    async def me(req: Request):
+        return passthrough(await http.get(f"{GATEWAY}/v1/me", headers=auth_header(req)))
+
+    @app.get("/api/models")
+    async def models(req: Request):
+        code, _ = await gw_me(req)
+        if code != 200:
+            return JSONResponse({"error": {"message": "invalid API key"}}, status_code=401)
+        return {"models": await model_board(), "at": time.time()}
+
+    @app.post("/api/chat")
+    async def chat(req: Request):
+        """게이트웨이 응답을 그대로 흘려보낸다(상태 코드·Retry-After·SSE 포함). 응답 정책은 게이트웨이 한곳에 둔다."""
+        upstream = await http.send(http.build_request(
+            "POST", f"{GATEWAY}/v1/chat/completions", content=await req.body(),
+            headers={**auth_header(req), "content-type": "application/json"},
+            timeout=httpx.Timeout(600.0, connect=3.0)), stream=True)
+        keep = {k: v for k, v in upstream.headers.items() if k.lower() in ("retry-after",)}
+        return StreamingResponse(upstream.aiter_raw(), status_code=upstream.status_code, headers=keep,
+                                 media_type=upstream.headers.get("content-type", "application/json"),
+                                 background=BackgroundTask(upstream.aclose))
+
+    @app.get("/api/chats")
+    async def chat_list(req: Request):
+        uid, bad = await chat_user(req)
+        return bad or {"chats": chats.list(uid)}
+
+    @app.get("/api/chats/{cid}")
+    async def chat_get(req: Request, cid: str):
+        uid, bad = await chat_user(req, cid)
+        if bad:
+            return bad
+        c = chats.get(uid, cid)
+        return c or JSONResponse({"error": {"message": "chat not found"}}, status_code=404)
+
+    @app.put("/api/chats/{cid}")
+    async def chat_put(req: Request, cid: str):
+        uid, bad = await chat_user(req, cid)
+        if bad:
+            return bad
+        try:
+            return chats.save(uid, cid, await req.json())
+        except (ValueError, json.JSONDecodeError) as e:
+            return JSONResponse({"error": {"message": str(e)}}, status_code=400)
+
+    @app.delete("/api/chats/{cid}")
+    async def chat_delete(req: Request, cid: str):
+        uid, bad = await chat_user(req, cid)
+        if bad:
+            return bad
+        return {"deleted": chats.delete(uid, cid)}
+
+
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+    # index.html은 같은 폴더 기준 상대 경로(app.css, app.js)로 부른다: 루트에서도 같은 파일을 내준다(API 경로가 먼저 잡힌다)
+    app.mount("/", StaticFiles(directory=STATIC), name="root")
+    return app
+
+
+if __name__ == "__main__":
+    uvicorn.run(build_app(), host="0.0.0.0", port=int(os.environ.get("PORT", "8088")), log_level="warning")
