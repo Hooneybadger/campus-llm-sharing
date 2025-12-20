@@ -120,4 +120,145 @@
   function every(ms, fn) { S.timers.push(setInterval(() => { if (!document.hidden) fn(); }, ms)); }
   function clearTimers() { S.timers.forEach(clearInterval); S.timers = []; }
 
+  // ------------------------------------------------------------------ 로그인·셸
+  async function loadMe() { S.me = await getJSON('/api/me'); return S.me; }
+
+  function showChrome() {
+    const on = !!S.me;
+    document.body.classList.toggle('is-auth', on);
+    $('#who-id').textContent = on ? S.me.user_id : '';
+    $('#who-tier').textContent = on ? TIER[S.me.tier] || S.me.tier : '';
+    $$('[data-staff-only]').forEach((e) => { e.hidden = !(on && S.me.tier === 'staff'); });
+  }
+
+  function logout(msg) {
+    S.key = null; S.me = null; S.chat.log = []; S.chat.id = null; S.chat.list = []; store.del('pknu.key'); store.del('pknu.chat.id');
+    if (S.chat.ctrl) S.chat.ctrl.abort();
+    showChrome();
+    location.hash = '#/login';
+    route();
+    if (msg) { const help = $('#login-help'); help.dataset.tone = 'error'; help.textContent = msg; }
+  }
+
+  $('#login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const input = $('#login-key'), help = $('#login-help'), btn = e.submitter || $('#login-form .btn');
+    const key = input.value.trim();
+    if (!key) {
+      input.setAttribute('aria-invalid', 'true'); help.dataset.tone = 'error';
+      help.textContent = 'API 키를 입력해주세요.'; input.focus(); return;
+    }
+    btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = '확인 중';
+    S.key = key;
+    try {
+      await loadMe();
+      store.set('pknu.key', key);
+      input.value = ''; input.removeAttribute('aria-invalid'); delete help.dataset.tone;
+      help.textContent = '정보전산원에서 발급받은 sk-pknu로 시작하는 키입니다.';
+      showChrome();
+      location.hash = '#/chat';
+      route();
+    } catch (err) {
+      S.key = null; S.me = null;
+      input.setAttribute('aria-invalid', 'true'); help.dataset.tone = 'error';
+      help.textContent = err instanceof ApiError && err.status === 401
+        ? '로그인할 수 없는 키입니다. 키를 다시 확인해주세요.'
+        : '서버에 연결할 수 없습니다. 잠시 후에 다시 시도해주세요.';
+      input.focus();
+    } finally {
+      btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = '로그인';
+    }
+  });
+  $('#login-key').addEventListener('input', (e) => e.target.removeAttribute('aria-invalid'));
+  $('[data-logout]').addEventListener('click', () => logout());
+
+  const bar = $('.bar'), menuBtn = $('.menu-btn');
+  menuBtn.addEventListener('click', () => {
+    const open = !bar.hasAttribute('data-open');
+    bar.toggleAttribute('data-open', open); menuBtn.setAttribute('aria-expanded', String(open));
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && bar.hasAttribute('data-open')) { bar.removeAttribute('data-open'); menuBtn.setAttribute('aria-expanded', 'false'); menuBtn.focus(); }
+  });
+
+  // ------------------------------------------------------------------ 라우터
+  const TITLES = { login: '로그인', chat: '실습', models: '모델 상태', usage: '사용량', docs: 'API 안내', ops: '운영 현황' };
+  const VIEWS = {};
+  function route() {
+    clearTimers();
+    bar.removeAttribute('data-open'); menuBtn.setAttribute('aria-expanded', 'false');
+    let name = (location.hash.match(/^#\/(\w+)/) || [])[1] || 'models';
+    if (!S.me) name = 'login';
+    else if (name === 'login' || !VIEWS[name] || (name === 'ops' && S.me.tier !== 'staff')) name = 'models';
+    const first = S.view === null;
+    S.view = name;
+    $$('[data-view]').forEach((v) => { v.hidden = v.dataset.view !== name; });
+    $$('.nav a').forEach((a) => (a.dataset.route === name ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current')));
+    document.title = `${TITLES[name]} | AI 실습 플랫폼`;
+    if (name !== 'login') VIEWS[name]();
+    if (!first) { const hd = $(`[data-view="${name}"] h1`); if (hd) { hd.setAttribute('tabindex', '-1'); hd.focus({ preventScroll: true }); window.scrollTo(0, 0); } }
+  }
+  window.addEventListener('hashchange', route);
+
+  // ------------------------------------------------------------------ 모델 상태(공통): 부하 = 토큰 예산 대비 처리 중인 양
+  function loadOf(m) {
+    if (m.token_budget) return m.inflight_tokens / m.token_budget;
+    if (m.max_inflight) return m.inflight / m.max_inflight;
+    return 0;
+  }
+  function stateOf(m) {
+    if (!m.available || m.backends_healthy === 0) return ['down', '중단'];
+    if (m.queue > 0 || loadOf(m) >= 0.8) return ['busy', '혼잡'];
+    return ['ok', '사용 가능'];
+  }
+  function loadBar(m) {
+    const v = Math.min(1, Math.max(0, loadOf(m)));
+    const fill = h('span', { class: 'load__fill' });
+    fill.style.setProperty('--v', String(v));
+    return h('div', { class: 'load', 'data-high': v >= 0.8 || null },
+      h('span', { class: 'load__track', role: 'img', 'aria-label': `부하 ${Math.round(v * 100)}%` }, fill),
+      h('span', { class: 'load__val num', text: `${Math.round(v * 100)}%` }));
+  }
+  function boardTable(rows, extra = [], { ids = true } = {}) {
+    return h('div', { class: 'board' }, table([
+      { label: '모델', cell: (m) => [h('span', { class: 'cell-title', text: m.title }), ids ? h('span', { class: 'cell-sub mono', text: m.id }) : null] },
+      { label: '상태', cell: (m) => { const [k, t] = stateOf(m); return h('span', { class: 'state', 'data-state': k, text: t }); } },
+      { label: '처리 중', cls: 'num', cell: (m) => h('span', { class: 'fig', text: int(m.inflight) }) },
+      { label: '대기', cls: 'num', cell: (m) => [h('span', { class: 'fig', text: int(m.queue) }), h('span', { class: 'unit', text: ` / ${int(m.queue_max)}` })] },
+      { label: '부하', cell: loadBar },
+      { label: '문맥 길이', cls: 'num', cell: (m) => [int(m.max_model_len), h('span', { class: 'unit', text: ' 토큰' })] },
+      ...extra,
+    ], rows));
+  }
+  async function refreshModels() {
+    const d = await getJSON('/api/models');
+    S.models = d.models;
+    return d;
+  }
+
+  // ------------------------------------------------------------------ 모델 화면
+  VIEWS.models = () => {
+    const region = $('#models-board'), at = $('#models-at');
+    const load = async (first) => {
+      if (first) loading(region, 6);
+      try {
+        const d = await refreshModels();
+        if (!d.models.length) { empty(region, '등록된 모델이 없습니다.', '운영자가 모델을 등록하면 여기에 나타납니다.'); return; }
+        filled(region, boardTable(d.models));
+        at.textContent = `5초마다 갱신, 마지막 ${kst(d.at)} KST`;
+      } catch (err) { if (first || !region.querySelector('table')) failed(region, '모델 상태를 불러오지 못했습니다.', err, () => load(true)); }
+    };
+    load(true);
+    every(5000, () => load(false));
+  };
+
+  // ------------------------------------------------------------------ 시작
+  (async () => {
+    try { S.cfg = await fetch('/api/config').then((r) => r.json()); } catch { S.cfg = {}; }
+    if (S.key) {
+      try { await loadMe(); } catch { S.key = null; S.me = null; store.del('pknu.key'); }
+    }
+    showChrome();
+    route();
+  })();
 })();

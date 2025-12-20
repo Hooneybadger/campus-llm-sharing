@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 실습 플랫폼 | 부경대학교 컴퓨터인공지능공학부</title>
+<meta name="description" content="공유 GPU 서버에서 여러 LLM으로 대화하고 모델 상태와 사용량을 확인하는 실습 플랫폼입니다.">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo+Mono:wght@400;500;800&amp;display=swap">
+<link rel="stylesheet" href="app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+
+<header class="bar">
+  <div class="bar__in container">
+    <a class="mark" href="#/chat" aria-label="AI 실습 플랫폼 첫 화면">
+      <span class="mark__org">부경대학교 컴퓨터인공지능공학부</span>
+      <span class="mark__name">AI 실습 플랫폼</span>
+    </a>
+    <button class="btn btn--quiet menu-btn" type="button" aria-expanded="false" aria-controls="nav" data-auth-only>메뉴</button>
+    <nav id="nav" class="nav" aria-label="주 메뉴" data-auth-only>
+      <a href="#/models" data-route="models">모델</a>
+    </nav>
+    <div class="who" data-auth-only>
+      <span class="who__id" id="who-id"></span>
+      <span class="who__tier" id="who-tier"></span>
+      <button class="btn btn--quiet btn--s" type="button" data-logout>로그아웃</button>
+    </div>
+  </div>
+</header>
+
+<main id="main" class="container" tabindex="-1">
+  <noscript><p class="notice">이 화면은 JavaScript를 켜야 쓸 수 있습니다. API는 JavaScript 없이도 쓸 수 있습니다.</p></noscript>
+
+  <section class="view view--login" data-view="login" aria-labelledby="login-h">
+    <div class="login">
+      <div class="login__intro">
+        <h1 id="login-h"><span class="login__org">부경대학교 컴퓨터인공지능공학부</span> AI 실습 플랫폼</h1>
+        <p class="lead">학과 GPU 서버로 로컬 LLM을 활용할 수 있습니다.</p>
+      </div>
+      <form class="form" id="login-form" novalidate>
+        <label for="login-key">API 키</label>
+        <div class="row">
+          <input class="input mono" id="login-key" name="api_key" type="password" autocomplete="current-password" spellcheck="false" required aria-describedby="login-help">
+          <button class="btn btn--primary" type="submit">로그인</button>
+        </div>
+        <p class="help" id="login-help">정보전산원에서 발급받은 sk-pknu로 시작하는 키입니다.</p>
+      </form>
+    </div>
+  </section>
+
+
+  <section class="view" data-view="models" aria-labelledby="models-h" hidden>
+    <div class="head">
+      <h1 id="models-h">모델 상태</h1>
+      <p class="live" id="models-at" role="status"></p>
+    </div>
+    <p class="lead">부하는 모델이 한 번에 받을 수 있는 양 가운데 지금 쓰고 있는 비율입니다. 100%에 가까우면 새 요청은 대기열에서 차례를 기다립니다.</p>
+    <div class="region" id="models-board"></div>
+  </section>
+
+
+
+</main>
+
+</body>
+</html>
