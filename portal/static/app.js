@@ -543,6 +543,53 @@
     every(10000, async () => { try { await refreshModels(); describeModel(); } catch { /* 다음 주기에 다시 */ } });
   };
 
+  // ------------------------------------------------------------------ 사용량
+  const RESULT = {
+    ok: '성공', stream_broken: '도중에 끊김', client_closed: '멈춤', user_rpm: '분당 한도 초과', user_concurrency: '동시 요청 초과',
+    queue_full: '대기열 가득 참', queue_timeout: '대기 시간 초과', no_backend: '서버 없음', context_length: '문맥 길이 초과',
+    unknown_model: '없는 모델', bad_json: '형식 오류', backend: '모델 서버 오류', backend_connect: '연결 실패',
+  };
+  VIEWS.usage = () => {
+    const fig = $('#usage-figures'), rec = $('#usage-recent');
+    const load = async (first) => {
+      if (first) { loading(fig, 2); loading(rec, 6); }
+      try {
+        const me = await loadMe();
+        const t = me.today, codes = t.codes || {};
+        const ok = codes['200'] || 0;
+        $('#usage-who').textContent = `${me.user_id}, ${TIER[me.tier] || me.tier}, ${me.group}`;
+        filled(fig,
+          h('div', { class: 'usage-now' },
+            plate('최근 1분 요청', int(me.now.rpm_used), '회', int(me.limits.rpm)),
+            plate('지금 처리 중', int(me.now.inflight), '건', int(me.limits.max_concurrent))),
+          h('dl', { class: 'cells cells--4' },
+            figure('오늘 요청', int(t.requests), '건'),
+            figure('거절된 요청', int(t.requests - ok), '건'),
+            figure('입력 토큰', int(t.prompt_tokens)),
+            figure('출력 토큰', int(t.completion_tokens))));
+        if (!me.recent.length) {
+          empty(rec, '오늘 보낸 요청이 없습니다.', '실습 화면이나 API로 요청을 보내면 결과와 걸린 시간이 여기에 남습니다.',
+            h('a', { class: 'btn btn--quiet btn--s', href: '#/chat', text: '실습으로 가기' }));
+          return;
+        }
+        const names = Object.fromEntries(S.models.map((m) => [m.id, m.title]));
+        filled(rec, table([
+          { label: '시각(KST)', cls: 'time', cell: (x) => kst(x.ts) },
+          { label: '모델', cell: (x) => names[x.model] || x.model },
+          { label: '결과', cell: (x) => (x.code === '200' && x.reason === 'ok' ? `${x.code} ${RESULT.ok}` : h('span', { class: 'state', 'data-state': 'busy', text: `${x.code} ${RESULT[x.reason] || x.reason}` })) },
+          { label: '입력 토큰', cls: 'num', cell: (x) => (x.code === '200' ? int(x.prompt_tokens) : '-') },
+          { label: '출력 토큰', cls: 'num', cell: (x) => (x.code === '200' ? int(x.completion_tokens) : '-') },
+          { label: '첫 응답', cls: 'num', cell: (x) => secs(x.ttft_s) },
+          { label: '전체', cls: 'num', cell: (x) => secs(x.dur_s) },
+        ], me.recent));
+      } catch (err) {
+        if (first) { failed(fig, '사용량을 불러오지 못했습니다.', err, () => load(true)); rec.replaceChildren(); }
+      }
+    };
+    (S.models.length ? Promise.resolve() : refreshModels().catch(() => {})).then(() => load(true));
+    every(10000, () => load(false));
+  };
+
   // ------------------------------------------------------------------ 시작
   (async () => {
     try { S.cfg = await fetch('/api/config').then((r) => r.json()); } catch { S.cfg = {}; }
