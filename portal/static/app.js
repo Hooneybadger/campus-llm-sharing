@@ -590,6 +590,60 @@
     every(10000, () => load(false));
   };
 
+  // ------------------------------------------------------------------ API 안내
+  VIEWS.docs = () => {
+    const base = S.cfg.api_base || location.origin + '/v1';
+    const model = (S.models.find((m) => stateOf(m)[0] !== 'down') || S.models[0] || { id: 'Qwen3-4B-Instruct-2507' }).id;
+    const masked = S.key ? `${S.key.slice(0, 10)}${'•'.repeat(8)}${S.key.slice(-4)}` : '';
+    const keyEl = $('#docs-key'), showBtn = $('[data-show-key]'), help = $('#docs-help');
+    $('#docs-base').textContent = base;
+    keyEl.textContent = masked; showBtn.textContent = '보기'; showBtn.setAttribute('aria-pressed', 'false');
+    showBtn.onclick = () => {
+      const on = showBtn.getAttribute('aria-pressed') !== 'true';
+      keyEl.textContent = on ? S.key : masked; showBtn.textContent = on ? '숨기기' : '보기'; showBtn.setAttribute('aria-pressed', String(on));
+    };
+    $$('[data-copy]').forEach((b) => { b.onclick = () => copyText(b.dataset.copy === 'key' ? S.key : base, help); });
+    // 에이전트용: 문맥이 가장 긴(동률이면 먼저 나온) 사용 가능 모델
+    const agent = [...S.models].filter((m) => stateOf(m)[0] !== 'down').sort((x, y) => y.max_model_len - x.max_model_len)[0]
+      || { id: 'gpt-oss-20b', title: 'GPT-OSS-20B', max_model_len: 8192 };
+    $('#docs-openclaw').textContent = [
+      '{',
+      '  models: {',
+      '    providers: {',
+      '      pknu: {',
+      `        baseUrl: "${base}",`,
+      '        apiKey: "${PKNU_API_KEY}",',
+      '        api: "openai-completions",',
+      `        models: [{ id: "${agent.id}", name: "${agent.title}", contextWindow: ${agent.max_model_len}, maxTokens: ${Math.min(S.me.limits.max_tokens_cap, 2048)} }],`,
+      '      },',
+      '    },',
+      '  },',
+      `  agents: { defaults: { model: { primary: "pknu/${agent.id}" } } },`,
+      '}',
+    ].join('\n');
+    $('#docs-py').textContent = [
+      'from openai import OpenAI', '',
+      `client = OpenAI(base_url="${base}", api_key="발급받은_API_키")`,
+      'resp = client.chat.completions.create(',
+      `    model="${model}",`,
+      '    messages=[{"role": "user", "content": "부경대학교가 있는 도시는?"}],',
+      '    max_tokens=256,', ')',
+      'print(resp.choices[0].message.content)',
+    ].join('\n');
+    $('#docs-curl').textContent = [
+      `curl ${base}/chat/completions \\`,
+      '  -H "Authorization: Bearer $PKNU_API_KEY" \\',
+      '  -H "Content-Type: application/json" \\',
+      `  -d '{"model": "${model}", "messages": [{"role": "user", "content": "안녕하세요"}], "max_tokens": 128}'`,
+    ].join('\n');
+    const lim = S.me.limits;
+    filled($('#docs-limits'), h('dl', { class: 'cells cells--3' },
+      figure('분당 요청', int(lim.rpm), '회'),
+      figure('동시 요청', int(lim.max_concurrent), '건'),
+      figure('요청당 최대 출력', int(lim.max_tokens_cap), '토큰')));
+    if (!S.models.length) refreshModels().then(() => { if (S.view === 'docs') VIEWS.docs(); }).catch(() => {});
+  };
+
   // ------------------------------------------------------------------ 시작
   (async () => {
     try { S.cfg = await fetch('/api/config').then((r) => r.json()); } catch { S.cfg = {}; }

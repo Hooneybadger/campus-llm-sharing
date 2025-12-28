@@ -249,6 +249,18 @@ body:not(.is-auth) .bar { display: none; }   /* 첫 화면(로그인)에는 머�
 .md .md-pre { white-space: pre; }
 .md hr { width: 100%; height: 0; margin: 0; border: 0; border-top: var(--rule-hair) solid var(--color-rule); }
 
+/* ---------------------------------------------------------------- docs */
+.kv { display: grid; margin: 0; background: var(--color-ink); color: var(--color-on-ink); }
+.kv > div { display: grid; grid-template-columns: 9rem minmax(0, 1fr); align-items: center; gap: var(--space-md); padding: var(--space-md) var(--space-lg); }
+.kv > div + div { border-top: var(--rule-hair) solid var(--color-ink-rule); }
+.kv dt { color: var(--color-on-ink-muted); font-size: var(--text-sm); font-weight: 500; }
+.kv dd { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); margin: 0; }
+.kv code { color: var(--color-accent-2); font-size: var(--text-lg); font-weight: 800; overflow-wrap: anywhere; }
+.kv .btn { border-color: var(--color-on-ink); color: var(--color-on-ink); }
+@media (hover: hover) { .kv .btn:hover { background: var(--color-on-ink); color: var(--color-ink); } }
+.code { margin: 0; padding: var(--space-md) var(--space-lg); overflow-x: auto; background: var(--color-ink); color: var(--color-on-ink); font-size: var(--text-sm); line-height: 1.7; }
+.code:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
 /* ---------------------------------------------------------------- narrow screens */
 @media (max-width: 60rem) {
   .btn { font-size: var(--text-md); }

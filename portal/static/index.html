@@ -28,6 +28,7 @@
       <a href="#/chat" data-route="chat">실습</a>
       <a href="#/models" data-route="models">모델</a>
       <a href="#/usage" data-route="usage">사용량</a>
+      <a href="#/docs" data-route="docs">API 안내</a>
     </nav>
     <div class="who" data-auth-only>
       <span class="who__id" id="who-id"></span>
@@ -123,6 +124,43 @@
     <p class="note">오늘 사용량은 자정(KST)에 0부터 다시 셉니다. 거절된 요청도 원인을 확인할 수 있도록 함께 남깁니다.</p>
   </section>
 
+  <section class="view" data-view="docs" aria-labelledby="docs-h" hidden>
+    <div class="head">
+      <h1 id="docs-h">API 안내</h1>
+    </div>
+    <p class="lead">OpenAI 호환 API입니다. OpenClaw 같은 에이전트 도구나 openai 라이브러리에 주소와 키만 넣으면 그대로 동작합니다.</p>
+    <dl class="kv">
+      <div>
+        <dt>API 주소</dt>
+        <dd><code id="docs-base"></code><button class="btn btn--quiet btn--s" type="button" data-copy="base">복사</button></dd>
+      </div>
+      <div>
+        <dt>내 API 키</dt>
+        <dd><code id="docs-key"></code><button class="btn btn--quiet btn--s" type="button" data-show-key aria-pressed="false">보기</button><button class="btn btn--quiet btn--s" type="button" data-copy="key">복사</button></dd>
+      </div>
+    </dl>
+    <p class="help" id="docs-help" aria-live="polite"></p>
+    <h2>OpenClaw</h2>
+    <p class="note">에이전트는 첫 요청부터 지시문이 길어, 문맥이 8K인 모델로 연결합니다. 설정 파일은 <code>~/.openclaw/openclaw.json</code>이고 키는 환경 변수 <code>PKNU_API_KEY</code>로 넘깁니다.</p>
+    <pre class="code"><code id="docs-openclaw"></code></pre>
+    <h2>Python</h2>
+    <pre class="code"><code id="docs-py"></code></pre>
+    <h2>curl</h2>
+    <pre class="code"><code id="docs-curl"></code></pre>
+    <h2>내 한도</h2>
+    <div class="region" id="docs-limits"></div>
+    <h2>응답 코드</h2>
+    <table class="table">
+      <thead><tr><th scope="col">코드</th><th scope="col">뜻</th><th scope="col">할 일</th></tr></thead>
+      <tbody>
+        <tr><td class="time">400</td><td>대화가 모델의 문맥 길이를 넘었거나 요청 형식이 잘못됐습니다.</td><td>대화를 줄이거나 문맥이 긴 모델을 고릅니다.</td></tr>
+        <tr><td class="time">401</td><td>API 키가 없거나 틀렸습니다.</td><td>발급받은 키를 확인합니다.</td></tr>
+        <tr><td class="time">404</td><td>제공하지 않는 모델 이름입니다.</td><td>모델 상태 화면의 이름을 그대로 씁니다.</td></tr>
+        <tr><td class="time">429</td><td>내 한도(분당 요청, 동시 요청)를 넘었습니다.</td><td>Retry-After 헤더의 초만큼 기다린 뒤 다시 보냅니다.</td></tr>
+        <tr><td class="time">503</td><td>모델에 요청이 몰렸거나 서버를 점검 중입니다.</td><td>Retry-After만큼 기다립니다. 계속되면 다른 모델을 씁니다.</td></tr>
+      </tbody>
+    </table>
+  </section>
 
 </main>
 
