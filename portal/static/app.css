@@ -261,6 +261,9 @@ body:not(.is-auth) .bar { display: none; }   /* 첫 화면(로그인)에는 머�
 .code { margin: 0; padding: var(--space-md) var(--space-lg); overflow-x: auto; background: var(--color-ink); color: var(--color-on-ink); font-size: var(--text-sm); line-height: 1.7; }
 .code:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
+/* ---------------------------------------------------------------- ops */
+.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 var(--space-xl); }
+
 /* ---------------------------------------------------------------- narrow screens */
 @media (max-width: 60rem) {
   .btn { font-size: var(--text-md); }

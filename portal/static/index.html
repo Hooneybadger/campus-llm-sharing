@@ -29,6 +29,7 @@
       <a href="#/models" data-route="models">모델</a>
       <a href="#/usage" data-route="usage">사용량</a>
       <a href="#/docs" data-route="docs">API 안내</a>
+      <a href="#/ops" data-route="ops" data-staff-only hidden>운영</a>
     </nav>
     <div class="who" data-auth-only>
       <span class="who__id" id="who-id"></span>
@@ -162,6 +163,30 @@
     </table>
   </section>
 
+  <section class="view" data-view="ops" aria-labelledby="ops-h" hidden>
+    <div class="head">
+      <h1 id="ops-h">운영 현황</h1>
+      <p class="live" id="ops-at" role="status"></p>
+      <a class="head__link" id="ops-grafana" href="#" target="_blank" rel="noopener">Grafana 대시보드 열기</a>
+    </div>
+    <div class="region" id="ops-figures"></div>
+    <h2>모델</h2>
+    <div class="region" id="ops-models"></div>
+    <div class="split">
+      <div>
+        <h2>GPU</h2>
+        <div class="region" id="ops-gpus"></div>
+      </div>
+      <div>
+        <h2>활성 알림</h2>
+        <div class="region" id="ops-alerts"></div>
+      </div>
+    </div>
+    <h2>오늘 사용자</h2>
+    <div class="region" id="ops-users"></div>
+    <h2>확장 풀</h2>
+    <div class="region" id="ops-slots"></div>
+  </section>
 </main>
 
 </body>

@@ -644,6 +644,89 @@
     if (!S.models.length) refreshModels().then(() => { if (S.view === 'docs') VIEWS.docs(); }).catch(() => {});
   };
 
+  // ------------------------------------------------------------------ 운영 현황(운영자)
+  const SEV = { critical: ['down', '심각'], warning: ['warn', '주의'] };
+  VIEWS.ops = () => {
+    const R = { fig: $('#ops-figures'), models: $('#ops-models'), gpus: $('#ops-gpus'), alerts: $('#ops-alerts'), users: $('#ops-users'), slots: $('#ops-slots') };
+    $('#ops-grafana').href = S.cfg.grafana || '#';
+    const part = (region, sec, what, render, first) => {
+      if (!sec.ok) { failed(region, what, new ApiError(502, sec.error), () => load(true)); return; }
+      render(sec.data);
+    };
+    const load = async (first) => {
+      if (first) { loading(R.fig, 2); Object.values(R).slice(1).forEach((r) => loading(r, 4)); }
+      let d;
+      try { d = await getJSON('/api/ops'); } catch (err) {
+        if (first) { failed(R.fig, '운영 현황을 불러오지 못했습니다.', err, () => load(true)); Object.values(R).slice(1).forEach((r) => r.replaceChildren()); }
+        return;
+      }
+      $('#ops-at').textContent = `10초마다 갱신, 마지막 ${kst(d.at)} KST`;
+      const traffic = d.traffic.ok ? d.traffic.data : {};
+      const tot = Object.values(traffic).reduce((s, x) => s + x.rps, 0);
+      const ok = Object.values(traffic).reduce((s, x) => s + (x.codes['200'] || 0), 0);
+      const p95 = Object.values(traffic).map((x) => x.ttft_p95_s).filter((x) => x != null);
+      filled(R.fig, h('dl', { class: 'band' },
+        figure('요청(5분 평균)', tot.toFixed(2), '건/s'),
+        figure('성공 비율', tot ? (ok / tot * 100).toFixed(1) : '-', tot ? '%' : null),
+        figure('가장 느린 모델 첫 응답 p95', p95.length ? Math.max(...p95).toFixed(2) : '-', p95.length ? 's' : null),
+        figure('활성 알림', d.alerts.ok ? int(d.alerts.data.length) : '-', '건'),
+        figure('오늘 요청한 사용자', d.users.ok ? int(d.users.data.active_users) : '-', '명')));
+      part(R.models, d.models, '모델 상태를 불러오지 못했습니다.', (rows) => {
+        if (d.models.ok) S.models = rows;
+        filled(R.models, boardTable(rows, [
+          { label: '서버', cls: 'num', cell: (m) => [int(m.backends_healthy), h('span', { class: 'unit', text: ` / ${int(m.backends_total)}` })] },
+          { label: '요청/s', cls: 'num', cell: (m) => (traffic[m.id] ? traffic[m.id].rps.toFixed(2) : '0.00') },
+          { label: '첫 응답 p95', cls: 'num', cell: (m) => secs(traffic[m.id] && traffic[m.id].ttft_p95_s) },
+          { label: '거절(5분)', cls: 'num', cell: (m) => { const c = (traffic[m.id] || { codes: {} }).codes; const rej = (c['429'] || 0) + (c['503'] || 0); return [(rej * 300).toFixed(0), h('span', { class: 'unit', text: '건' })]; } },
+        ], { ids: false }));
+      }, first);
+      part(R.gpus, d.gpus, 'GPU 지표를 불러오지 못했습니다.', (rows) => {
+        if (!rows.length) { empty(R.gpus, 'GPU 지표가 없습니다.', 'DCGM exporter가 아직 수집하지 않았습니다.'); return; }
+        filled(R.gpus, table([
+          { label: '노드', cell: (g) => [h('span', { class: 'cell-title', text: g.node }), h('span', { class: 'cell-sub', text: (g.model || '').replace('NVIDIA GeForce ', '') })] },
+          { label: '서비스', cell: (g) => (g.pod ? g.pod.replace(/-[a-z0-9]{8,10}-[a-z0-9]{5}$/, '') : '비어 있음') },
+          { label: '메모리', cls: 'num', cell: (g) => [(g.mem_used_mib / 1024).toFixed(1), h('span', { class: 'unit', text: ` / ${(g.mem_total_mib / 1024).toFixed(0)} GiB` })] },
+          { label: '사용률', cls: 'num', cell: (g) => `${int(g.util_pct)}%` },
+          { label: '온도', cls: 'num', cell: (g) => `${int(g.temp_c)}°C` },
+          { label: '전력', cls: 'num', cell: (g) => `${int(g.power_w)} W` },
+        ], rows));
+      }, first);
+      part(R.alerts, d.alerts, '알림을 불러오지 못했습니다.', (rows) => {
+        if (!rows.length) { empty(R.alerts, '활성 알림이 없습니다.', '알림 규칙 15종이 감시 중입니다. 알림이 울리면 여기에 심각한 순서로 나타납니다.'); return; }
+        filled(R.alerts, table([
+          { label: '알림', cell: (a) => h('span', { class: 'cell-title', text: a.name, lang: 'en' }) },
+          { label: '심각도', cell: (a) => { const [k, t] = SEV[a.severity] || ['busy', a.severity || '-']; return h('span', { class: 'state', 'data-state': k, text: t }); } },
+          { label: '대상', cell: (a) => a.target || '-' },
+          { label: '시작(KST)', cls: 'time', cell: (a) => kst(Date.parse(a.starts_at) / 1000, { date: true, sec: false }) },
+        ], rows));
+      }, first);
+      part(R.users, d.users, '사용자 통계를 불러오지 못했습니다.', (u) => {
+        if (!u.users.length) { empty(R.users, '오늘 요청한 사용자가 없습니다.', '자정(KST)에 0부터 다시 셉니다.'); return; }
+        filled(R.users, table([
+          { label: '사용자', cell: (x) => [h('span', { class: 'cell-title', text: x.user_id }), h('span', { class: 'cell-sub', text: `${x.group || ''} ${TIER[x.tier] || ''}`.trim() })] },
+          { label: '요청', cls: 'num', cell: (x) => int(x.requests) },
+          { label: '429', cls: 'num', cell: (x) => int(x.codes['429'] || 0) },
+          { label: '503', cls: 'num', cell: (x) => int(x.codes['503'] || 0) },
+          { label: '입력 토큰', cls: 'num', cell: (x) => int(x.prompt_tokens) },
+          { label: '출력 토큰', cls: 'num', cell: (x) => int(x.completion_tokens) },
+          { label: '처리 중', cls: 'num', cell: (x) => int(x.inflight) },
+          { label: '마지막(KST)', cls: 'num', cell: (x) => kst(x.last_ts) },
+        ], u.users));
+      }, first);
+      part(R.slots, d.slots, '확장 풀 상태를 불러오지 못했습니다.', (rows) => {
+        if (!rows.length) { empty(R.slots, '확장 풀로 지정된 노드가 없습니다.', '노드에 pknu.ac.kr/gpu-role=pool 라벨을 붙이면 여기에 나타납니다.'); return; }
+        const ST = { free: ['ok', '비어 있음'], expansion: ['warn', '추론 확장'], other: ['down', '확인 필요'] };
+        filled(R.slots, table([
+          { label: '노드', cell: (s) => h('span', { class: 'cell-title', text: s.node }) },
+          { label: '상태', cell: (s) => { const [k, t] = ST[s.state] || ['busy', s.state]; return h('span', { class: 'state', 'data-state': s.ready ? k : 'down', text: s.ready ? t : '준비 안 됨' }); } },
+          { label: 'Pod', cell: (s) => (s.pod ? h('span', { class: 'mono', text: s.pod }) : '-') },
+        ], rows));
+      }, first);
+    };
+    load(true);
+    every(10000, () => load(false));
+  };
+
   // ------------------------------------------------------------------ 시작
   (async () => {
     try { S.cfg = await fetch('/api/config').then((r) => r.json()); } catch { S.cfg = {}; }

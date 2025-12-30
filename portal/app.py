@@ -178,14 +178,67 @@ async def section(coro):
         return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
 
 
+async def ops_traffic() -> dict:
+    by_code, p95 = await asyncio.gather(
+        prom("sum by (model, code) (rate(gw_requests_total[5m]))"),
+        prom("histogram_quantile(0.95, sum by (le, model) (rate(gw_ttft_seconds_bucket[5m])))"))
+    out: dict[str, dict] = {}
+    for r in by_code:
+        m = out.setdefault(r["metric"].get("model", "-"), {"rps": 0.0, "codes": {}, "ttft_p95_s": None})
+        v = num(r["value"][1]) or 0.0
+        m["rps"] += v
+        m["codes"][r["metric"].get("code", "?")] = v
+    for r in p95:
+        out.setdefault(r["metric"].get("model", "-"), {"rps": 0.0, "codes": {}, "ttft_p95_s": None})["ttft_p95_s"] = num(r["value"][1])
+    return out
 
 
+async def ops_gpus() -> list[dict]:
+    names = ["DCGM_FI_DEV_FB_USED", "DCGM_FI_DEV_FB_FREE", "DCGM_FI_DEV_FB_RESERVED", "DCGM_FI_DEV_GPU_UTIL",
+             "DCGM_FI_DEV_GPU_TEMP", "DCGM_FI_DEV_POWER_USAGE"]
+    res = await asyncio.gather(*(prom(n) for n in names))
+    gpus: dict[str, dict] = {}
+    for name, rows in zip(names, res):
+        for r in rows:
+            lab = r["metric"]
+            g = gpus.setdefault(lab["UUID"], {"node": lab.get("Hostname") or lab.get("hostname") or lab.get("node"),
+                                              "model": lab.get("modelName"), "pod": lab.get("exported_pod"),
+                                              "namespace": lab.get("exported_namespace")})
+            g[name] = num(r["value"][1])
+    out = []
+    for g in gpus.values():
+        used, free, rsv = (g.get(k) or 0 for k in ("DCGM_FI_DEV_FB_USED", "DCGM_FI_DEV_FB_FREE", "DCGM_FI_DEV_FB_RESERVED"))
+        out.append({"node": g["node"], "model": g["model"], "pod": g["pod"], "namespace": g["namespace"],
+                    "mem_used_mib": used, "mem_total_mib": used + free + rsv, "util_pct": g.get("DCGM_FI_DEV_GPU_UTIL"),
+                    "temp_c": g.get("DCGM_FI_DEV_GPU_TEMP"), "power_w": g.get("DCGM_FI_DEV_POWER_USAGE")})
+    return sorted(out, key=lambda x: x["node"] or "")
 
 
+async def ops_alerts() -> list[dict]:
+    r = await http.get(f"{ALERTMANAGER}/api/v2/alerts", params={"active": "true", "silenced": "false", "inhibited": "false"})
+    r.raise_for_status()
+    out = []
+    for a in r.json():
+        lab, ann = a.get("labels", {}), a.get("annotations", {})
+        if lab.get("alertname") in QUIET_ALERTS:
+            continue
+        out.append({"name": lab.get("alertname"), "severity": lab.get("severity"),
+                    "target": lab.get("model") or lab.get("pod") or lab.get("node") or lab.get("namespace"),
+                    "summary": ann.get("summary") or ann.get("description") or "", "starts_at": a.get("startsAt")})
+    sev = {"critical": 0, "warning": 1}
+    return sorted(out, key=lambda x: (sev.get(x["severity"], 2), x["starts_at"] or ""))
 
 
+async def ops_users() -> dict:
+    r = await http.get(f"{GATEWAY}/admin/usage", params={"limit": "15"}, headers={"x-admin-token": GW_ADMIN_TOKEN})
+    r.raise_for_status()
+    return r.json()
 
 
+async def ops_slots(req: Request) -> list[dict]:
+    r = await http.get(f"{RENTAL}/admin/slots", headers=auth_header(req))
+    r.raise_for_status()
+    return r.json()["slots"]
 
 
 def build_app(chats: ChatStore | None = None) -> FastAPI:
@@ -274,6 +327,17 @@ def build_app(chats: ChatStore | None = None) -> FastAPI:
             return bad
         return {"deleted": chats.delete(uid, cid)}
 
+    @app.get("/api/ops")
+    async def ops(req: Request):
+        code, me = await gw_me(req)
+        if code != 200:
+            return JSONResponse({"error": {"message": "invalid API key"}}, status_code=401)
+        if me.get("tier") != "staff":
+            return JSONResponse({"error": {"message": "운영자 등급 키만 볼 수 있습니다."}}, status_code=403)
+        keys = ["models", "traffic", "gpus", "alerts", "users", "slots"]
+        vals = await asyncio.gather(section(model_board()), section(ops_traffic()), section(ops_gpus()),
+                                    section(ops_alerts()), section(ops_users()), section(ops_slots(req)))
+        return {"at": time.time(), **dict(zip(keys, vals))}
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     # index.html은 같은 폴더 기준 상대 경로(app.css, app.js)로 부른다: 루트에서도 같은 파일을 내준다(API 경로가 먼저 잡힌다)
