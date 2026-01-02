@@ -1,0 +1,31 @@
+# TS-004 대응 — GPU 자원 회계(nvidia.com/gpu)를 거치지 않는 GPU 접근을 정책 계층에서 차단한다.
+# 시스템 네임스페이스(kube-system: device plugin, monitoring: DCGM exporter)는 전 GPU 접근이 필요하므로 제외.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: pknu-gpu-access}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules: [{apiGroups: [""], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [pods]}]
+  validations:
+    # ① nvidia 런타임을 쓰려면 반드시 GPU를 요청해야 한다 (이미지 기본 env NVIDIA_VISIBLE_DEVICES=all 경로 차단)
+    - expression: >-
+        !has(object.spec.runtimeClassName) || object.spec.runtimeClassName != 'nvidia' ||
+        object.spec.containers.exists(c, has(c.resources.limits) && 'nvidia.com/gpu' in c.resources.limits)
+      message: "runtimeClassName=nvidia requires a nvidia.com/gpu resource limit (GPU access must go through scheduling)."
+      reason: Forbidden
+    # ③ NVIDIA_VISIBLE_DEVICES를 사용자가 지정하면 할당받은 GPU 외의 장치를 볼 수 있다
+    - expression: >-
+        object.spec.containers.all(c, !has(c.env) || c.env.all(e, e.name != 'NVIDIA_VISIBLE_DEVICES'))
+      message: "Setting NVIDIA_VISIBLE_DEVICES is not allowed; GPUs are assigned by the device plugin."
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: pknu-gpu-access}
+spec:
+  policyName: pknu-gpu-access
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions: [{key: kubernetes.io/metadata.name, operator: NotIn, values: [kube-system, monitoring]}]

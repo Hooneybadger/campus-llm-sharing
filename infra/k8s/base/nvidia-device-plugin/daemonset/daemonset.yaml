@@ -1,0 +1,98 @@
+# helm template nvdp/nvidia-device-plugin 0.20.1 (runtimeClassName=nvidia) 렌더링 결과
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin
+  namespace: kube-system
+  labels:
+    helm.sh/chart: nvidia-device-plugin-0.20.1
+    app.kubernetes.io/name: nvidia-device-plugin
+    app.kubernetes.io/instance: nvdp
+    app.kubernetes.io/version: 0.20.1
+    app.kubernetes.io/managed-by: Helm
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nvidia-device-plugin
+      app.kubernetes.io/instance: nvdp
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nvidia-device-plugin
+        app.kubernetes.io/instance: nvdp
+      annotations: {}
+    spec:
+      priorityClassName: system-node-critical
+      runtimeClassName: nvidia
+      securityContext: {}
+      serviceAccountName: nvidia-device-plugin-service-account
+      containers:
+      - image: nvcr.io/nvidia/k8s-device-plugin:v0.20.1
+        imagePullPolicy: IfNotPresent
+        name: nvidia-device-plugin-ctr
+        command:
+        - nvidia-device-plugin
+        env:
+        - name: MPS_ROOT
+          value: /run/nvidia/mps
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: all
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: compute,utility
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: kubelet-device-plugins-dir
+          mountPath: /var/lib/kubelet/device-plugins
+        - name: mps-shm
+          mountPath: /dev/shm
+        - name: mps-root
+          mountPath: /mps
+        - name: cdi-root
+          mountPath: /var/run/cdi
+      volumes:
+      - name: kubelet-device-plugins-dir
+        hostPath:
+          path: /var/lib/kubelet/device-plugins
+          type: Directory
+      - name: mps-root
+        hostPath:
+          path: /run/nvidia/mps
+          type: DirectoryOrCreate
+      - name: mps-shm
+        hostPath:
+          path: /run/nvidia/mps/shm
+      - name: cdi-root
+        hostPath:
+          path: /var/run/cdi
+          type: DirectoryOrCreate
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: feature.node.kubernetes.io/pci-10de.present
+                operator: In
+                values:
+                - 'true'
+            - matchExpressions:
+              - key: feature.node.kubernetes.io/cpu-model.vendor_id
+                operator: In
+                values:
+                - NVIDIA
+            - matchExpressions:
+              - key: nvidia.com/gpu.present
+                operator: In
+                values:
+                - 'true'
+      tolerations:
+      - key: CriticalAddonsOnly
+        operator: Exists
+      - effect: NoSchedule
+        key: nvidia.com/gpu
+        operator: Exists
