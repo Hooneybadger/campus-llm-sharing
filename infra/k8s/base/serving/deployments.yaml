@@ -138,3 +138,133 @@ spec:
   - name: phi4-mini
     port: 8003
     targetPort: 8003
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: serving-gptoss
+  namespace: llm-serving
+  labels:
+    app: serving-gptoss
+    pknu.ac.kr/component: serving
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: serving-gptoss
+  template:
+    metadata:
+      labels:
+        app: serving-gptoss
+        pknu.ac.kr/component: serving
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        pknu.ac.kr/gpu-role: serving-gptoss
+      terminationGracePeriodSeconds: 40
+      containers:
+      - name: vllm
+        image: registry.example.com/campus-llm-sharing/vllm-serving:0.32.0-r4
+        args:
+        - /etc/pknu/profile.yaml
+        - /etc/pknu/registry.yaml
+        env:
+        - name: VLLM_NO_USAGE_STATS
+          value: '1'
+        - name: HF_HUB_OFFLINE
+          value: '1'
+        - name: MODELS_ROOT
+          value: /models
+        ports:
+        - name: health
+          containerPort: 8000
+        - name: gpt-oss-20b
+          containerPort: 8001
+        resources:
+          requests:
+            cpu: '3'
+            memory: 24Gi
+          limits:
+            nvidia.com/gpu: 1
+            memory: 40Gi
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          failureThreshold: 90
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /livez
+            port: 8000
+          periodSeconds: 10
+          failureThreshold: 3
+        volumeMounts:
+        - name: models
+          mountPath: /models
+          readOnly: true
+        - name: cache
+          mountPath: /root/.cache
+        - name: dshm
+          mountPath: /dev/shm
+        - name: profile
+          mountPath: /etc/pknu/profile.yaml
+          subPath: gptoss.yaml
+        - name: registry
+          mountPath: /etc/pknu/registry.yaml
+          subPath: registry.yaml
+      volumes:
+      - name: models
+        hostPath:
+          path: /data/llm/models
+          type: Directory
+      - name: cache
+        hostPath:
+          path: /data/llm/cache
+          type: DirectoryOrCreate
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 8Gi
+      - name: profile
+        configMap:
+          name: serving-profiles
+      - name: registry
+        configMap:
+          name: model-registry
+      tolerations:
+      - key: node.kubernetes.io/unreachable
+        operator: Exists
+        effect: NoExecute
+        tolerationSeconds: 30
+      - key: node.kubernetes.io/not-ready
+        operator: Exists
+        effect: NoExecute
+        tolerationSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: serving-gptoss
+  namespace: llm-serving
+  labels:
+    app: serving-gptoss
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: serving-gptoss
+  ports:
+  - name: health
+    port: 8000
+    targetPort: 8000
+  - name: gpt-oss-20b
+    port: 8001
+    targetPort: 8001
