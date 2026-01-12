@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: llm-system
+resources: [gateway.yaml]
+generatorOptions: {disableNameSuffixHash: true}   # 이름 고정 → ConfigMap 갱신이 기존 Pod에 그대로 반영
+configMapGenerator:
+  - name: gateway-routes
+    files: [routes.yaml=../../../../gateway/routes.k8s.yaml]
+# gateway-keys and gw-admin-token are provisioned separately; see docs/deployment.md.

@@ -1,0 +1,30 @@
+# 게이트웨이(llm-system)가 llm-serving의 EndpointSlice를 읽는 권한.
+# 게이트웨이 kustomization의 namespace: llm-system 변환을 받지 않도록 분리했다 (TS-010).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: llm-gateway-discovery
+  namespace: llm-serving
+rules:
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: llm-gateway-discovery
+  namespace: llm-serving
+subjects:
+- kind: ServiceAccount
+  name: llm-gateway
+  namespace: llm-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: llm-gateway-discovery
