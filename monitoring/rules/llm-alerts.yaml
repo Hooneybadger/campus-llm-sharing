@@ -1,0 +1,98 @@
+# P3-3 알림 규칙 — 이번 실험에서 실제로 겪은 장애 유형을 잡도록 설계했다(괄호 안은 근거 TS·실험).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: llm-serving-alerts
+  namespace: monitoring
+  labels: {app: llm-serving}
+spec:
+  groups:
+    - name: llm-availability
+      interval: 5s
+      rules:
+        - alert: ModelNoHealthyBackend
+          # Pod가 Ready여도 서비스 불가인 상황(TS-010 디스커버리 403, 전 백엔드 장애)
+          expr: sum by (model) (gw_backend_up) == 0
+          for: 15s
+          labels: {severity: critical}
+          annotations: {summary: "모델 {{ $labels.model }}의 정상 백엔드가 0개 — 해당 모델 요청 전부 503"}
+        - alert: BackendExcluded
+          expr: gw_backend_up == 0
+          for: 10s
+          labels: {severity: warning}
+          annotations: {summary: "{{ $labels.model }} 백엔드 {{ $labels.backend }} 라우팅 제외됨"}
+        - alert: GatewayDown
+          # 게이트웨이(사용자 API 진입점) 다운 = 전면 중단. S7 F6에서 알림 누락 확인 후 추가
+          expr: (absent(up{job="monitoring/llm-gateway"} == 1))
+          for: 10s
+          labels: {severity: critical}
+          annotations: {summary: "LLM 게이트웨이 응답 불능 — 사용자 API 전면 중단"}
+        - alert: VLLMProcessDown
+          # 소형 Pod의 vLLM 프로세스 하나가 죽음 — 슈퍼바이저가 재기동 중
+          expr: multi_vllm_child_up == 0
+          for: 10s
+          labels: {severity: warning}
+          annotations: {summary: "{{ $labels.model }} vLLM 프로세스 다운 (슈퍼바이저 재기동 대기)"}
+        - alert: VLLMRestartLoop
+          expr: increase(multi_vllm_restarts_total[15m]) >= 3 or (multi_vllm_restarts_total >= 3 unless (multi_vllm_restarts_total offset 15m))
+          labels: {severity: critical}
+          annotations: {summary: "{{ $labels.model }} 15분 내 3회 이상 재기동 — 수동 조치 필요 (OOM·설정 오류 의심)"}
+        - alert: VLLMHang
+          # 응답 불능: 실행 중 요청이 있는데 토큰 생성이 멈춤(프로세스는 살아 있어 헬스체크로는 늦게 잡힘)
+          expr: (sum by (model_name, pod) (vllm:num_requests_running) > 0) and (sum by (model_name, pod) (rate(vllm:generation_tokens_total[30s])) == 0)
+          for: 20s
+          labels: {severity: critical}
+          annotations: {summary: "{{ $labels.model_name }} 응답 불능 — 실행 중 요청이 있으나 30초간 생성 토큰 0"}
+        - alert: VLLMScrapeDown
+          expr: up{job="monitoring/vllm-serving"} == 0
+          for: 15s
+          labels: {severity: warning}
+          annotations: {summary: "{{ $labels.pod }}:{{ $labels.endpoint }} 메트릭 수집 실패 (프로세스 종료·멈춤)"}
+    - name: llm-performance
+      interval: 5s
+      rules:
+        - alert: GatewayOverload503
+          expr: sum by (model) (rate(gw_requests_total{code="503"}[1m])) / sum by (model) (rate(gw_requests_total[1m])) > 0.10
+          for: 1m
+          labels: {severity: warning}
+          annotations: {summary: "{{ $labels.model }} 과부하 거절(503) 비율 10% 초과 — 확장 검토"}
+        - alert: HighTTFT
+          expr: histogram_quantile(0.95, sum by (model, le) (rate(gw_ttft_seconds_bucket[2m]))) > 10
+          for: 2m
+          labels: {severity: warning}
+          annotations: {summary: "{{ $labels.model }} P95 TTFT {{ $value | humanize }}s (대기열 포함)"}
+        - alert: KVCacheSaturated
+          expr: vllm:kv_cache_usage_perc > 0.95
+          for: 1m
+          labels: {severity: warning}
+          annotations: {summary: "{{ $labels.model_name }} KV 캐시 95% 초과 — 선점·대기 증가 (P2-1 E5)"}
+        - alert: KVPreemptionStorm
+          expr: rate(vllm:num_preemptions_total[1m]) > 0.5
+          for: 1m
+          labels: {severity: warning}
+          annotations: {summary: "{{ $labels.model_name }} 선점 초당 {{ $value | humanize }}회 — 동시 처리 한도 과다"}
+    - name: gpu
+      interval: 5s
+      rules:
+        - alert: GPUMemoryNearFull
+          expr: DCGM_FI_DEV_FB_FREE < 512
+          for: 30s
+          labels: {severity: warning}
+          annotations: {summary: "{{ $labels.node }} GPU 여유 메모리 {{ $value }}MiB — OOM 위험"}
+        - alert: GPUHot
+          expr: DCGM_FI_DEV_GPU_TEMP > 85
+          for: 5m
+          labels: {severity: warning}
+          annotations: {summary: "{{ $labels.node }} GPU 온도 {{ $value }}C"}
+        - alert: GPUXidError
+          # GeForce는 DCGM XID 필드 미지원 → 커널 로그(NVRM: Xid) 기반 exporter
+          # 처음 등장한 Xid 코드는 시계열이 1부터 시작해 increase()가 0이 된다(TS-014) → 새 시계열도 함께 잡는다
+          expr: (increase(gpu_xid_errors_total[5m]) > 0) or (gpu_xid_errors_total unless (gpu_xid_errors_total offset 5m))
+          labels: {severity: critical}
+          annotations: {summary: "{{ $labels.node }} GPU Xid {{ $labels.xid }} 발생 — 하드웨어·드라이버 오류"}
+        - alert: GPUUnexpectedProcessMemory
+          # 서빙 노드 GPU 사용량이 서빙 Pod 예산보다 크다 → 다른 프로세스가 GPU를 쓰고 있음(TS-004류)
+          expr: DCGM_FI_DEV_FB_USED{node=~".+"} > 31500
+          for: 1m
+          labels: {severity: warning}
+          annotations: {summary: "{{ $labels.node }} GPU 사용량 {{ $value }}MiB — 예산 밖 사용 의심"}

@@ -1,0 +1,54 @@
+# promtool test rules — 실제 장애 없이 알림 규칙 논리를 검증한다 (TS-014 회귀 포함)
+rule_files: [rules.flat.yaml]
+evaluation_interval: 5s
+tests:
+  - name: 처음 등장한 Xid 시계열도 알림 (TS-014)
+    interval: 10s
+    input_series:
+      - series: 'gpu_xid_errors_total{node="omen-03",pci="0000:01:00",xid="79"}'
+        values: '_ _ _ 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 40s
+        alertname: GPUXidError
+        exp_alerts: [{exp_labels: {severity: critical, node: omen-03, pci: "0000:01:00", xid: "79"},
+                      exp_annotations: {summary: "omen-03 GPU Xid 79 발생 — 하드웨어·드라이버 오류"}}]
+  - name: 정상 백엔드 0개 → 15초 후 critical (TS-010)
+    interval: 5s
+    input_series:
+      - series: 'gw_backend_up{model="gpt-oss-20b",backend="http://10.0.0.3:8001"}'
+        values: '1 1 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 10s
+        alertname: ModelNoHealthyBackend
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: ModelNoHealthyBackend
+        exp_alerts: [{exp_labels: {severity: critical, model: gpt-oss-20b},
+                      exp_annotations: {summary: "모델 gpt-oss-20b의 정상 백엔드가 0개 — 해당 모델 요청 전부 503"}}]
+  - name: 응답 불능(실행 중인데 토큰 0) 감지
+    interval: 5s
+    input_series:
+      - series: 'vllm:num_requests_running{model_name="Qwen3-4B-Instruct-2507",pod="p1"}'
+        values: '4x20'
+      - series: 'vllm:generation_tokens_total{model_name="Qwen3-4B-Instruct-2507",pod="p1"}'
+        values: '0+100x6 600x14'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: VLLMHang
+        exp_alerts: []
+      - eval_time: 95s
+        alertname: VLLMHang
+        exp_alerts: [{exp_labels: {severity: critical, model_name: Qwen3-4B-Instruct-2507, pod: p1},
+                      exp_annotations: {summary: "Qwen3-4B-Instruct-2507 응답 불능 — 실행 중 요청이 있으나 30초간 생성 토큰 0"}}]
+  - name: 게이트웨이 수집 실패 → 10초 후 critical (S7 F6)
+    interval: 5s
+    input_series:
+      - series: 'up{job="monitoring/llm-gateway",pod="gw1"}'
+        values: '1 1 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5s
+        alertname: GatewayDown
+        exp_alerts: []
+      - eval_time: 25s
+        alertname: GatewayDown
+        exp_alerts: [{exp_labels: {severity: critical}, exp_annotations: {summary: "LLM 게이트웨이 응답 불능 — 사용자 API 전면 중단"}}]
