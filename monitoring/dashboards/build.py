@@ -55,6 +55,15 @@ y += 4
 ts("응답 코드별 요청/초 (모델)", [('sum by (model, code, reason) (rate(gw_requests_total[1m]))', "{{model}} {{code}} {{reason}}")], "reqps", w=24, stack=True)
 y += 8
 
+row("지연")
+ts("게이트웨이 TTFT P95 (대기열 포함)", [('histogram_quantile(0.95, sum by (model, le) (rate(gw_ttft_seconds_bucket[1m])))', "{{model}}")], "s", x=0)
+ts("vLLM TTFT P95 (엔진 내부)", [('histogram_quantile(0.95, sum by (model_name, le) (rate(vllm:time_to_first_token_seconds_bucket[1m])))', "{{model_name}}")], "s", x=8)
+ts("토큰 간 지연 ITL P95", [('histogram_quantile(0.95, sum by (model_name, le) (rate(vllm:inter_token_latency_seconds_bucket[1m])))', "{{model_name}}")], "s", x=16)
+y += 8
+ts("게이트웨이 대기열 대기 P95", [('histogram_quantile(0.95, sum by (model, le) (rate(gw_queue_wait_seconds_bucket[1m])))', "{{model}}")], "s", x=0)
+ts("E2E 지연 P95", [('histogram_quantile(0.95, sum by (model_name, le) (rate(vllm:e2e_request_latency_seconds_bucket[1m])))', "{{model_name}}")], "s", x=8)
+y += 8
+
 dash = {"title": "교내 LLM 서빙 — 운영 개요", "uid": "pknu-llm-serving", "timezone": "Asia/Seoul", "refresh": "5s",
         "time": {"from": "now-30m", "to": "now"}, "schemaVersion": 39, "panels": panels, "tags": ["pknu", "llm"]}
 out = Path(__file__).with_name("llm-serving.json")
