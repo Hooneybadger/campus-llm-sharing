@@ -64,6 +64,13 @@ ts("게이트웨이 대기열 대기 P95", [('histogram_quantile(0.95, sum by (m
 ts("E2E 지연 P95", [('histogram_quantile(0.95, sum by (model_name, le) (rate(vllm:e2e_request_latency_seconds_bucket[1m])))', "{{model_name}}")], "s", x=8)
 y += 8
 
+row("부하·대기열")
+ts("vLLM 실행 중 / 대기 중", [('sum by (model_name) (vllm:num_requests_running)', "{{model_name}} running"),
+                         ('sum by (model_name) (vllm:num_requests_waiting)', "{{model_name}} waiting")], x=0)
+ts("게이트웨이 진행 중 / 대기열", [('sum by (model) (gw_inflight)', "{{model}} inflight"), ('sum by (model) (gw_queue_length)', "{{model}} queue")], x=8)
+ts("KV 캐시 사용률", [('max by (model_name) (vllm:kv_cache_usage_perc)', "{{model_name}}")], "percentunit", x=16)
+y += 8
+
 dash = {"title": "교내 LLM 서빙 — 운영 개요", "uid": "pknu-llm-serving", "timezone": "Asia/Seoul", "refresh": "5s",
         "time": {"from": "now-30m", "to": "now"}, "schemaVersion": 39, "panels": panels, "tags": ["pknu", "llm"]}
 out = Path(__file__).with_name("llm-serving.json")
