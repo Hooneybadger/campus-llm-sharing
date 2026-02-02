@@ -71,6 +71,12 @@ ts("게이트웨이 진행 중 / 대기열", [('sum by (model) (gw_inflight)', "
 ts("KV 캐시 사용률", [('max by (model_name) (vllm:kv_cache_usage_perc)', "{{model_name}}")], "percentunit", x=16)
 y += 8
 
+row("처리량")
+ts("생성 토큰/초", [('sum by (model_name) (rate(vllm:generation_tokens_total[1m]))', "{{model_name}}")], "short", x=0, stack=True)
+ts("프롬프트 토큰/초", [('sum by (model_name) (rate(vllm:prompt_tokens_total[1m]))', "{{model_name}}")], "short", x=8, stack=True)
+ts("선점(preemption)/초", [('sum by (model_name) (rate(vllm:num_preemptions_total[1m]))', "{{model_name}}")], "short", x=16)
+y += 8
+
 dash = {"title": "교내 LLM 서빙 — 운영 개요", "uid": "pknu-llm-serving", "timezone": "Asia/Seoul", "refresh": "5s",
         "time": {"from": "now-30m", "to": "now"}, "schemaVersion": 39, "panels": panels, "tags": ["pknu", "llm"]}
 out = Path(__file__).with_name("llm-serving.json")
