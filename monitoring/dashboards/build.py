@@ -77,6 +77,13 @@ ts("프롬프트 토큰/초", [('sum by (model_name) (rate(vllm:prompt_tokens_to
 ts("선점(preemption)/초", [('sum by (model_name) (rate(vllm:num_preemptions_total[1m]))', "{{model_name}}")], "short", x=16)
 y += 8
 
+row("GPU (DCGM, GeForce 지원 필드)")
+ts("GPU 메모리 사용 (MiB)", [('DCGM_FI_DEV_FB_USED', "{{node}}")], "decmbytes", x=0)
+ts("GPU 사용률 / DRAM 활성도", [('DCGM_FI_DEV_GPU_UTIL', "{{node}} util%"), ('DCGM_FI_PROF_DRAM_ACTIVE * 100', "{{node}} DRAM%")], "percent", x=8)
+ts("전력·온도·SM 클럭", [('DCGM_FI_DEV_POWER_USAGE', "{{node}} W"), ('DCGM_FI_DEV_GPU_TEMP', "{{node}} °C"),
+                       ('DCGM_FI_DEV_SM_CLOCK / 10', "{{node}} SM MHz/10")], x=16)
+y += 8
+
 dash = {"title": "교내 LLM 서빙 — 운영 개요", "uid": "pknu-llm-serving", "timezone": "Asia/Seoul", "refresh": "5s",
         "time": {"from": "now-30m", "to": "now"}, "schemaVersion": 39, "panels": panels, "tags": ["pknu", "llm"]}
 out = Path(__file__).with_name("llm-serving.json")
