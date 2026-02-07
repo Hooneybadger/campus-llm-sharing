@@ -84,6 +84,12 @@ ts("전력·온도·SM 클럭", [('DCGM_FI_DEV_POWER_USAGE', "{{node}} W"), ('DC
                        ('DCGM_FI_DEV_SM_CLOCK / 10', "{{node}} SM MHz/10")], x=16)
 y += 8
 
+row("모델 프로세스와 추론 풀")
+ts("vLLM 프로세스 상태 (슈퍼바이저)", [('multi_vllm_child_up', "{{model}}")], x=0)
+ts("재기동 누적", [('multi_vllm_restarts_total', "{{model}}")], x=8)
+ts("확장 풀 슬롯", [('rental_slots', "{{state}}")], x=16, stack=True)
+y += 8
+
 dash = {"title": "교내 LLM 서빙 — 운영 개요", "uid": "pknu-llm-serving", "timezone": "Asia/Seoul", "refresh": "5s",
         "time": {"from": "now-30m", "to": "now"}, "schemaVersion": 39, "panels": panels, "tags": ["pknu", "llm"]}
 out = Path(__file__).with_name("llm-serving.json")
