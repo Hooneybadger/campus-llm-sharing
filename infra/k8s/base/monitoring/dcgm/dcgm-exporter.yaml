@@ -1,0 +1,26 @@
+# DCGM exporter — GeForce(5090)에서 확인한 수집 가능 필드: FB_USED/FREE, GPU_UTIL, SM/MEM_CLOCK, POWER, TEMP, ENERGY,
+# PCIE_REPLAY, PROF_DRAM_ACTIVE, PROF_PIPE_TENSOR_ACTIVE, PROF_GR_ENGINE_ACTIVE, PROF_PCIE_RX/TX_BYTES.
+# 수집 불가(GeForce): PROF_SM_ACTIVE/OCCUPANCY, XID_ERRORS → GPU 하드웨어 오류는 커널 로그로 감지(P3-3).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: dcgm-exporter, namespace: monitoring, labels: {app: dcgm-exporter}}
+spec:
+  selector: {matchLabels: {app: dcgm-exporter}}
+  template:
+    metadata: {labels: {app: dcgm-exporter}}
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector: {nvidia.com/gpu.present: "true"}
+      containers:
+        - name: exporter
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:4.6.1-4.8.4-distroless
+          args: ["-f", "/etc/dcgm-exporter/dcp-metrics-included.csv"]
+          env:
+            - {name: NVIDIA_VISIBLE_DEVICES, value: all}
+            - {name: DCGM_EXPORTER_KUBERNETES, value: "true"}
+            - {name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
+          ports: [{name: metrics, containerPort: 9400}]
+          securityContext: {capabilities: {add: [SYS_ADMIN]}}
+          resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 512Mi}}
+          volumeMounts: [{name: pod-resources, mountPath: /var/lib/kubelet/pod-resources, readOnly: true}]
+      volumes: [{name: pod-resources, hostPath: {path: /var/lib/kubelet/pod-resources}}]

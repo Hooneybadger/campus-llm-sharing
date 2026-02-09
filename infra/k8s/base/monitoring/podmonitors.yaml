@@ -1,0 +1,31 @@
+# 수집 대상 — Prometheus scrapeInterval 5s(kps-values). node 라벨을 붙여 노드별(=GPU별) 집계가 되게 한다.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata: {name: vllm-serving, namespace: monitoring}
+spec:
+  namespaceSelector: {matchNames: [llm-serving]}
+  selector: {matchExpressions: [{key: pknu.ac.kr/component, operator: In, values: [serving, emulator]}]}
+  podMetricsEndpoints:
+    - {port: qwen3-4b, interval: 5s, relabelings: &rl [{sourceLabels: [__meta_kubernetes_pod_node_name], targetLabel: node}, {sourceLabels: [__meta_kubernetes_pod_label_app], targetLabel: unit}]}
+    - {port: ministral-3b, interval: 5s, relabelings: *rl}
+    - {port: phi4-mini, interval: 5s, relabelings: *rl}
+    - {port: gpt-oss-20b, interval: 5s, relabelings: *rl}
+    - {port: qwen3-30b-a3b, interval: 5s, relabelings: *rl}
+    - {port: health, interval: 5s, relabelings: *rl}      # 슈퍼바이저 multi_vllm_* 메트릭
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata: {name: llm-gateway, namespace: monitoring}
+spec:
+  namespaceSelector: {matchNames: [llm-system]}
+  selector: {matchLabels: {app: llm-gateway}}
+  podMetricsEndpoints: [{port: http, interval: 5s}]
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata: {name: dcgm-exporter, namespace: monitoring}
+spec:
+  namespaceSelector: {matchNames: [monitoring]}
+  selector: {matchLabels: {app: dcgm-exporter}}
+  podMetricsEndpoints:
+    - {port: metrics, interval: 5s, relabelings: [{sourceLabels: [__meta_kubernetes_pod_node_name], targetLabel: node}]}

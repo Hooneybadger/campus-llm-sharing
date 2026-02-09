@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: monitoring
+resources: [ops.yaml, ../../../../../monitoring/rules/llm-alerts.yaml]
+generatorOptions: {disableNameSuffixHash: true}
+configMapGenerator:
+  - name: xid-exporter
+    files: [xid_exporter.py=../../../../../monitoring/xid_exporter.py]
+  - name: alert-sink
+    files: [alert_sink.py=../../../../../monitoring/alert_sink.py]
+  - name: dashboard-llm-serving
+    files: [llm-serving.json=../../../../../monitoring/dashboards/llm-serving.json]
+    options: {labels: {grafana_dashboard: "1"}}

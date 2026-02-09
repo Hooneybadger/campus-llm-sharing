@@ -1,0 +1,101 @@
+# kube-prometheus-stack 92.14.0 — 컨트롤 서비스 노드(로컬: k3s-node-4090, 목표: omen-08)에 배치
+crds:
+  enabled: true
+defaultRules:
+  create: true
+  rules:
+    etcd: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    kubeControllerManager: false
+    kubeProxy: false
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeProxy:
+  enabled: false
+alertmanager:
+  alertmanagerSpec:
+    nodeSelector:
+      pknu.ac.kr/control-services: 'true'
+  service:
+    type: NodePort
+    nodePort: 30093
+  config:
+    global:
+      resolve_timeout: 1m
+    route:
+      receiver: sink
+      group_by:
+      - alertname
+      - model
+      - node
+      group_wait: 0s
+      group_interval: 10s
+      repeat_interval: 1h
+      routes:
+      - receiver: 'null'
+        matchers:
+        - alertname =~ "Watchdog|InfoInhibitor|KubeControllerManagerDown|KubeSchedulerDown|etcd.*"
+    receivers:
+    - name: sink
+      webhook_configs:
+      - url: http://alert-sink.monitoring.svc:9095/
+        send_resolved: true
+    - name: 'null'
+grafana:
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  nodeSelector:
+    pknu.ac.kr/control-services: 'true'
+  service:
+    type: NodePort
+    nodePort: 30030
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: '1'
+      searchNamespace: ALL
+  grafana.ini:
+    dashboards:
+      min_refresh_interval: 5s
+prometheus:
+  service:
+    type: NodePort
+    nodePort: 30090
+  prometheusSpec:
+    nodeSelector:
+      pknu.ac.kr/control-services: 'true'
+    scrapeInterval: 5s
+    evaluationInterval: 5s
+    retention: 15d
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+      limits:
+        memory: 6Gi
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes:
+          - ReadWriteOnce
+          resources:
+            requests:
+              storage: 30Gi
+prometheusOperator:
+  nodeSelector:
+    pknu.ac.kr/control-services: 'true'
+kube-state-metrics:
+  nodeSelector:
+    pknu.ac.kr/control-services: 'true'
