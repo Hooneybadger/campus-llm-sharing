@@ -1,0 +1,13 @@
+# 목표 환경(OMEN 45L × 8, 노드당 5090 1장) 오버레이
+#  omen-01,02: serving-small  omen-03: serving-gptoss  omen-04: serving-qwen30b
+#  omen-05~08: pool (추론 확장)    omen-08: control-services (게이트웨이·모니터링·레지스트리)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - ../../base/nvidia-device-plugin/daemonset
+  - ../../base/monitoring/dcgm
+patches:
+  - target: {kind: Deployment, name: serving-small}
+    patch: |-
+      - {op: replace, path: /spec/replicas, value: 2}
