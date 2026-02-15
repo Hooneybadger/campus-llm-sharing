@@ -1,0 +1,23 @@
+name: Checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            gateway/requirements.txt
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+      - run: scripts/deploy.sh target build > /tmp/campus-manifests.yaml
+      - run: scripts/test_rules.sh
